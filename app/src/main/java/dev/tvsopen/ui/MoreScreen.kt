@@ -90,6 +90,34 @@ fun MoreScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
+            Text("CONNECTION", style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(connection.model.displayName, style = MaterialTheme.typography.titleMedium)
+                    // .label, not the enum name: this printed "CONNECTING".
+                    Text("State: ${connection.state.label}")
+                    connection.address?.let { Text("MAC: $it") }
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onScan, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Filled.Bluetooth, null, Modifier.size(18.dp))
+                            Spacer(Modifier.size(6.dp))
+                            Text("Scan")
+                        }
+                        OutlinedButton(onClick = onDisconnect, modifier = Modifier.weight(1f)) {
+                            Text("Disconnect")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
             Text("KEEP THE CONNECTION ALIVE", style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -124,72 +152,19 @@ fun MoreScreen(
 
         item { AppearanceCard() }
 
-        item { RiderNameCard(name = riderName, onNameChange = onRiderNameChange) }
+        item {
+            Text("NAMES", style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
 
         item {
-            DeviceNicknameCard(
+            NamesCard(
+                riderName = riderName,
+                onRiderNameChange = onRiderNameChange,
                 nickname = deviceNickname,
                 onNicknameChange = onDeviceNicknameChange,
             )
-        }
-
-        item {
-            Text("YOUR DATA", style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        item {
-            val ctx = LocalContext.current
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Export rides and settings as JSON. " +
-                            "Everything stays on your device unless you share it.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedButton(onClick = {
-                        val json = DataExport.buildJson(ctx)
-                        val intent = Intent(Intent.ACTION_SEND).apply {
-                            type = "application/json"
-                            putExtra(Intent.EXTRA_SUBJECT, "TVSRide export")
-                            putExtra(Intent.EXTRA_TEXT, json)
-                        }
-                        ctx.startActivity(Intent.createChooser(intent, "Export data"))
-                    }) {
-                        Text("Export & share")
-                    }
-                }
-            }
-        }
-
-        item {
-            Text("CONNECTION", style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(connection.model.displayName, style = MaterialTheme.typography.titleMedium)
-                    // .label, not the enum name: this printed "CONNECTING".
-                    Text("State: ${connection.state.label}")
-                    connection.address?.let { Text("MAC: $it") }
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = onScan, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Filled.Bluetooth, null, Modifier.size(18.dp))
-                            Spacer(Modifier.size(6.dp))
-                            Text("Scan")
-                        }
-                        OutlinedButton(onClick = onDisconnect, modifier = Modifier.weight(1f)) {
-                            Text("Disconnect")
-                        }
-                    }
-                }
-            }
         }
 
         item {
@@ -377,48 +352,38 @@ fun MoreScreen(
             }
         }
 
-        item { Spacer(Modifier.height(8.dp)) }
-    }
-}
-
-@Composable
-private fun RiderNameCard(name: String?, onNameChange: (String?) -> Unit) {
-    var editing by remember(name) { mutableStateOf(name.orEmpty()) }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Console greeting", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "Shown by the cluster on ignition. Saving sends it at once when " +
-                    "connected, otherwise on the next connection.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            OutlinedTextField(
-                value = editing,
-                onValueChange = { if (it.length <= 17) editing = it },
-                label = { Text("Rider name") },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth(),
-                supportingText = { Text("${editing.length}/17") },
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    val trimmed = editing.trim().takeIf { it.isNotEmpty() }
-                    onNameChange(trimmed)
-                    editing = trimmed.orEmpty()
-                }) { Text("Save") }
-                OutlinedButton(onClick = {
-                    editing = ""
-                    onNameChange(null)
-                }) { Text("Clear") }
-            }
-            Text(
-                if (name.isNullOrBlank()) "Cluster shows HELLO RIDER"
-                else "Saved: $name — sent now if connected, else on next connection",
-                style = MaterialTheme.typography.bodySmall,
-            )
+        item {
+            Text("YOUR DATA", style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+
+        item {
+            val ctx = LocalContext.current
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Export rides and settings as JSON. " +
+                            "Everything stays on your device unless you share it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(onClick = {
+                        val json = DataExport.buildJson(ctx)
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/json"
+                            putExtra(Intent.EXTRA_SUBJECT, "TVSRide export")
+                            putExtra(Intent.EXTRA_TEXT, json)
+                        }
+                        ctx.startActivity(Intent.createChooser(intent, "Export data"))
+                    }) {
+                        Text("Export & share")
+                    }
+                }
+            }
+        }
+
+        item { Spacer(Modifier.height(8.dp)) }
     }
 }
 
@@ -459,50 +424,58 @@ private fun NavigationCard(
 }
 
 /**
- * Device nickname: the name the cluster shows for this phone.
- *
- * The Apache RTR 160 4V shows it as "Connected to <name>" (its `V` frame).
- * Defaults to "APACHE" when none is saved.
+ * The two names the cluster shows: the rider name in the console greeting on
+ * ignition, and the device nickname for this phone ("Connected to <name>" on
+ * the Apache RTR 160 4V, its `V` frame; "APACHE" when none is saved).
+ * Save sends only the names that changed.
  */
 @Composable
-private fun DeviceNicknameCard(nickname: String?, onNicknameChange: (String?) -> Unit) {
-    val max = RidePrefs.MAX_NICKNAME_CHARS
-    var editing by remember(nickname) { mutableStateOf(nickname.orEmpty()) }
+private fun NamesCard(
+    riderName: String?,
+    onRiderNameChange: (String?) -> Unit,
+    nickname: String?,
+    onNicknameChange: (String?) -> Unit,
+) {
+    val maxNickname = RidePrefs.MAX_NICKNAME_CHARS
+    var editingRider by remember(riderName) { mutableStateOf(riderName.orEmpty()) }
+    var editingNickname by remember(nickname) { mutableStateOf(nickname.orEmpty()) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Device nickname", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "The name the cluster shows for this phone, as \"Connected to …\" (Apache RTR 160 4V). " +
-                    "Saving sends it at once when connected, otherwise on the next connection.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            OutlinedTextField(
+                value = editingRider,
+                onValueChange = { if (it.length <= 17) editingRider = it },
+                label = { Text("Console greeting") },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth(),
+                supportingText = { Text("${editingRider.length}/17") },
             )
             OutlinedTextField(
-                value = editing,
-                onValueChange = { if (it.length <= max) editing = it },
-                label = { Text("Nickname") },
+                value = editingNickname,
+                onValueChange = { if (it.length <= maxNickname) editingNickname = it },
+                label = { Text("Device nickname") },
                 placeholder = { Text(ApacheN112Driver.DEFAULT_NICKNAME) },
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
-                supportingText = { Text("${editing.length}/$max") },
+                supportingText = { Text("${editingNickname.length}/$maxNickname") },
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    val trimmed = editing.trim().takeIf { it.isNotEmpty() }
-                    onNicknameChange(trimmed)
-                    editing = trimmed.orEmpty()
+                    val rider = editingRider.trim().takeIf { it.isNotEmpty() }
+                    val nick = editingNickname.trim().takeIf { it.isNotEmpty() }
+                    if (rider != riderName) onRiderNameChange(rider)
+                    if (nick != nickname) onNicknameChange(nick)
+                    editingRider = rider.orEmpty()
+                    editingNickname = nick.orEmpty()
                 }) { Text("Save") }
                 OutlinedButton(onClick = {
-                    editing = ""
-                    onNicknameChange(null)
-                }) { Text("Reset") }
+                    editingRider = ""
+                    editingNickname = ""
+                    if (riderName != null) onRiderNameChange(null)
+                    if (nickname != null) onNicknameChange(null)
+                }) { Text("Clear") }
             }
-            Text(
-                if (nickname.isNullOrBlank()) "Using the default: ${ApacheN112Driver.DEFAULT_NICKNAME}"
-                else "Saved: $nickname",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }

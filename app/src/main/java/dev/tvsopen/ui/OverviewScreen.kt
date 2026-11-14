@@ -194,7 +194,7 @@ private fun Header(connection: ConnectionState1, connected: Boolean) {
                 .size(36.dp)
                 .background(
                     if (connected) LocalTilePalette.current.connected
-                    else MaterialTheme.colorScheme.outline,
+                    else MaterialTheme.colorScheme.error,
                     CircleShape,
                 ),
         )
