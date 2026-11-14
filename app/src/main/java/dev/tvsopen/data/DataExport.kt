@@ -26,7 +26,6 @@ object DataExport {
     fun buildJson(context: Context): String {
         val prefs = RidePrefs.load(context)
         val rides = Session.rides.value
-        val parked = Session.parked.value
 
         val root = JSONObject()
             .put("format", FORMAT)
@@ -38,23 +37,13 @@ object DataExport {
             val o = JSONObject()
                 .put("startedAt", r.startedAt)
                 .put("distanceKm", r.distanceKm)
+                .put("topSpeedKmh", r.topSpeedKmh ?: JSONObject.NULL)
             if (r.endedAt != null) o.put("endedAt", r.endedAt) else o.put("endedAt", JSONObject.NULL)
             ridesArr.put(o)
         }
         root.put("rides", ridesArr)
             .put("rideTotalCount", Session.totalRides.value)
             .put("rideTotalDistanceKm", Session.totalRideDistanceKm.value)
-
-        if (parked != null) {
-            root.put(
-                "parked",
-                JSONObject()
-                    .put("atMillis", parked.atMillis)
-                    .put("label", parked.label ?: JSONObject.NULL),
-            )
-        } else {
-            root.put("parked", JSONObject.NULL)
-        }
 
         root.put(
             "prefs",
@@ -63,7 +52,6 @@ object DataExport {
                 .put("navigationMirroring", prefs.navigationMirroring)
                 .put("mirrorPhoneCalls", prefs.mirrorPhoneCalls)
                 .put("mirrorMessages", prefs.mirrorMessages)
-                .put("rideMode", prefs.rideMode)
                 .put("theme", ThemePrefs.mode.name),
         )
 

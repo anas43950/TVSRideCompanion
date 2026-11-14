@@ -180,7 +180,10 @@ enum class Field(val officialName: String) {
     BYTE_5("BYTE_5"), BYTE_6("BYTE_6"), BYTE_7("BYTE_7"), BYTE_8("BYTE_8"),
     BYTE_9("BYTE_9"), BYTE_10("BYTE_10"), BYTE_11("BYTE_11"), BYTE_12("BYTE_12"),
     BYTE_13("BYTE_13"), BYTE_14("BYTE_14"), BYTE_15("BYTE_15"), BYTE_16("BYTE_16"),
-    BYTE_17("BYTE_17"), BYTE_18("BYTE_18");
+    BYTE_17("BYTE_17"), BYTE_18("BYTE_18"),
+
+    /** Apache N112 `Y` record: 1 = the handlebar button asks to end the call. */
+    CALL_DISCONNECT("DISCONNECT_CALL");
 }
 
 /**
@@ -203,6 +206,64 @@ object Gatt {
 
     /** `BluetoothConstants.BLE_MTU`. */
     const val REQUESTED_MTU = 512
+}
+
+/**
+ * One Bluetooth layout a TVS cluster can expose.
+ *
+ * The petrol SmartXonnect line (Ntorq, Jupiter, Raider, older Apache) shares
+ * one service. The Apache RTR 160 4V with the MSPL "Tarang Mini" module does
+ * not: it exposes a serial-style service at `5500` instead, verified on the
+ * rider's bike with nRF Connect and an HCI capture of the official app
+ * (2026-11-14). The transport tries every profile after service discovery and
+ * reports which one matched, so the right driver can be picked from what the
+ * vehicle actually offers rather than from its advertised name.
+ *
+ * Pure strings and ints, no Android types, so profile matching stays testable
+ * on the JVM.
+ */
+data class GattProfile(
+    val id: String,
+    val serviceUuid: String,
+    val writeUuid: String,
+    /** Characteristics to subscribe to, in order. Missing ones are skipped. */
+    val notifyUuids: List<String>,
+    /**
+     * Which of [notifyUuids] must exist for the profile to match at all. The
+     * SmartXonnect list also carries an optional extra entry.
+     */
+    val requiredNotifyUuid: String,
+) {
+    companion object {
+        /** `BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE`, inlined to stay JVM-pure. */
+        const val WRITE_TYPE_NO_RESPONSE = 1
+
+        val SMARTXONNECT = GattProfile(
+            id = "smartxonnect",
+            serviceUuid = Gatt.SERVICE,
+            writeUuid = Gatt.WRITE,
+            notifyUuids = listOf(Gatt.READ, Gatt.DEVICE_INFO),
+            requiredNotifyUuid = Gatt.READ,
+        )
+
+        /**
+         * Apache RTR 160 4V (TVS project N112), MSPL "Tarang Mini" module.
+         *
+         * `5501` notifies telemetry, `5502` takes write-without-response. `5503`
+         * (indicate + write) answers a data write with "write not permitted" and
+         * the official app never touches it, so it is left alone. `5504` is
+         * read-only and unused.
+         */
+        val APACHE_N112 = GattProfile(
+            id = "apache-n112",
+            serviceUuid = "00005500-d102-11e1-9b23-000240198212",
+            writeUuid = "00005502-d102-11e1-9b23-000240198212",
+            notifyUuids = listOf("00005501-d102-11e1-9b23-000240198212"),
+            requiredNotifyUuid = "00005501-d102-11e1-9b23-000240198212",
+        )
+
+        val ALL: List<GattProfile> = listOf(SMARTXONNECT, APACHE_N112)
+    }
 }
 
 /** Per-model connection policy, from the `*BLEConnectionConfig` classes. */

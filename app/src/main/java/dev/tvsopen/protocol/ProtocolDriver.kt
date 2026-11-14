@@ -69,6 +69,20 @@ interface ProtocolDriver {
      */
     fun buildNavTextSecondary(nav: NavStep): ByteArray? = null
 
+    /**
+     * The complete set of navigation frames for one step, in send order, for
+     * clusters whose navigation does not follow the control-plus-text-row
+     * shape above (the Apache N112 sends an `N` frame and an optional `O`
+     * frame). Null means "use buildNavControl / buildNavText".
+     */
+    fun buildNavFrames(nav: NavStep): List<ByteArray>? = null
+
+    /** How often [buildNavFrames] is re-sent while navigating; null = the bridge default. */
+    val navFrameIntervalMs: Long? get() = null
+
+    /** Resend the caller frames this often while the phone rings; null sends them once. */
+    val callerRepeatMs: Long? get() = null
+
     /** Plain 17-char text row for caller ID / song titles / notifications. */
     fun buildTextRow(row: Int, text: String): ByteArray?
 
@@ -120,6 +134,30 @@ interface ProtocolDriver {
      * thing a driver decides is whether its cluster renders it.
      */
     fun buildRiderName(name: String): ByteArray? = null
+
+    /**
+     * Whether this cluster needs [openingSequence] before it will talk.
+     *
+     * When true, the ride service sends the opening frames once notifications
+     * are on and starts the keepalive only after them, and does not send the
+     * rider name separately (it is part of the sequence).
+     */
+    val hasOpeningSequence: Boolean get() = false
+
+    /**
+     * Frames the cluster expects right after notifications are switched on,
+     * in order. Empty for clusters that start streaming on their own.
+     *
+     * The Apache N112 sends nothing until it has seen a phone-status frame and
+     * then `57 11`; see [ApacheN112Driver].
+     */
+    fun openingSequence(ctx: OpeningContext): List<ByteArray> = emptyList()
+
+    /**
+     * Phone signal/battery/missed-call frame, re-sent every few seconds while
+     * linked. Null for clusters that carry this inside [buildPing] instead.
+     */
+    fun buildPhoneStatus(status: PhoneStatus): ByteArray? = null
 
     // ---- handshake ----
 

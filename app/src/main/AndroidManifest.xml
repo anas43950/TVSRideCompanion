@@ -71,16 +71,23 @@
          network call sites are confined to dev.tvsopen.nav.maps; grep
          HttpURLConnection to verify nothing else opens a connection.
 
-         NOT requested: ANSWER_PHONE_CALLS and CALL_PHONE. Both are hard
-         restricted from Android 10 — only the app the user has set as the
-         default phone handler can ever hold them, and a third-party app asking
-         is denied instantly. Declaring them would mean shipping a permission
-         that can never be granted and a prompt that can only ever fail.
-         Answering a call from the cluster would first require becoming the
-         default dialer, which is a full InCallService and a different app. -->
+         Call reply (the Apache's handlebar end-call button), asked for from
+         the More screen and the first-run prompt:
+         ANSWER_PHONE_CALLS - end the ringing call (TelecomManager.endCall).
+                              A normal runtime permission since Android 8;
+                              an earlier note here wrongly called it
+                              default-dialer only.
+         SEND_SMS           - text the reply to the caller, contacts only.
+                              Sent through the SIM; never the call log or
+                              contacts themselves.
+
+         NOT requested: CALL_PHONE. Answering a call from the cluster is not
+         needed; the button only ends calls. -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
 
     <!-- Parked location, only when the user asks for it -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -95,6 +102,19 @@
          are read only to render caller ID as bytes on the cluster. -->
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <!-- Auto-connect. Companion Device Manager watches for the saved vehicle and
+         wakes VehiclePresenceService when it appears, even with the app closed,
+         and is what allows starting the connectedDevice foreground service from
+         the background. All three are normal (install-time) permissions; the
+         rider still consents once, in the system association dialog. Not
+         required: below Android 12 the app falls back to a background connect. -->
+    <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
+    <!-- SEND_SMS and ANSWER_PHONE_CALLS would otherwise make telephony required. -->
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
 
     <application
         android:allowBackup="false"
@@ -119,8 +139,18 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- Re-attach after reboot. Gated on the user having left the app in a
-             riding state; see BootReceiver. -->
+        <!-- Bound by the system when the associated vehicle comes into range
+             (Android 12+). See VehiclePresenceService. -->
+        <service
+            android:name=".transport.VehiclePresenceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
+
+        <!-- Re-attach after reboot when auto-connect is on; see BootReceiver. -->
         <receiver
             android:name=".transport.BootReceiver"
             android:exported="true"

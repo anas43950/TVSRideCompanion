@@ -133,6 +133,23 @@ class NavigationBridge(
             _hud.value = _hud.value.copy(active = true, navigationDataId = navigationDataId)
             while (isActive) {
                 val step = _hud.value.instruction
+                // Drivers with their own frame set (the Apache N112) skip the
+                // control/text-row logic below entirely.
+                val ownFrames = step?.let { driver.buildNavFrames(it.toNavStep()) }
+                if (ownFrames != null) {
+                    ownFrames.forEachIndexed { i, frame ->
+                        if (i > 0) delay(NAV_FRAME_GAP_MS)
+                        if (ble.write(frame)) {
+                            _hud.value = _hud.value.copy(
+                                framesSent = _hud.value.framesSent + 1, lastError = null,
+                            )
+                        } else {
+                            _hud.value = _hud.value.copy(lastError = "nav frame not written")
+                        }
+                    }
+                    delay(driver.navFrameIntervalMs ?: controlIntervalMs)
+                    continue
+                }
                 if (step != null) {
                     val key = "${step.title}|${step.street}|${step.distanceMeters}"
                     if (key != lastInstructionKey) {
@@ -232,5 +249,8 @@ class NavigationBridge(
 
     companion object {
         private const val TAG = "NavBridge"
+
+        /** Gap between the frames of one step; the official N112 sender waits 100 ms. */
+        private const val NAV_FRAME_GAP_MS = 100L
     }
 }

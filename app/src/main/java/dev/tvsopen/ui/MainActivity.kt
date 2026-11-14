@@ -1,7 +1,16 @@
 package dev.tvsopen.ui
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanFilter
+import android.companion.AssociationRequest
+import android.companion.BluetoothLeDeviceFilter
+import android.companion.CompanionDeviceManager
 import android.content.Intent
+import android.content.IntentSender
+import androidx.activity.result.IntentSenderRequest
+import androidx.annotation.RequiresApi
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -13,7 +22,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -42,11 +51,12 @@ import dev.tvsopen.transport.ConnectionState
 import dev.tvsopen.transport.RideService
 import dev.tvsopen.transport.ScooterPairing
 import dev.tvsopen.transport.ScooterScanner
+import dev.tvsopen.transport.label
 import dev.tvsopen.ui.theme.ThemePrefs
 import dev.tvsopen.ui.theme.TVSRideTheme
 
 /**
- * Single-activity host: bottom navigation between Home and More.
+ * Single-activity host: bottom navigation across Overview, Rides, More and Log.
  *
  * Deliberately thin. The protocol layer is the substance; the UI observes state
  * and sends intents to [RideService]. There is no account, no repository and no
@@ -77,6 +87,255 @@ class MainActivity : AppCompatActivity() {
                 else connectToRememberedCluster()
             }
         }
+
+    /**
+     * What to do once the user has answered the "Turn on Bluetooth?" dialog.
+     *
+     * Held here rather than captured by the launcher callback because
+     * `registerForActivityResult` must be registered before the activity
+     * starts, while the follow-up (scan, or connect) is only known later.
+     */
+    private var afterBluetoothOn: (() -> Unit)? = null
+
+    private val enableBluetoothLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val next = afterBluetoothOn
+            afterBluetoothOn = null
+            // Read the adapter rather than trusting the result code: some OEM
+            // dialogs return RESULT_CANCELED after turning the radio on anyway.
+            if (isBluetoothOn()) {
+                Log.i("MainActivity", "Bluetooth turned on from the prompt")
+                next?.invoke()
+            } else {
+                Log.i("MainActivity", "Bluetooth left off (result=${result.resultCode})")
+                Toast.makeText(
+                    this,
+                    "Bluetooth is off — turn it on to connect to your vehicle",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+
+    // ---- auto-connect: Companion Device Manager ----
+
+    /** The vehicle the companion dialog was shown for, read back in its result. */
+    private var pendingCompanionAddress: String? = null
+
+    /**
+     * What to do once the companion step is over, whatever its outcome.
+     *
+     * Usually "connect". The dialog searches for the vehicle's advertisement,
+     * and a vehicle stops advertising the moment it is connected — so
+     * connecting first left the dialog spinning on "Looking for devices…"
+     * until the rider gave up (seen on the RTR 160 4V, 2026-11-14). Connecting
+     * only after the dialog closes is the fix.
+     */
+    private var afterCompanion: (() -> Unit)? = null
+
+    private val companionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+            val address = pendingCompanionAddress
+            pendingCompanionAddress = null
+            if (address != null) {
+                if (result.resultCode == RESULT_OK) {
+                    Log.i("MainActivity", "companion association accepted")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) startObservingCompanion(address)
+                } else {
+                    Log.i("MainActivity", "companion association declined (result=${result.resultCode})")
+                }
+            }
+            finishCompanion()
+        }
+
+    private fun finishCompanion() {
+        val next = afterCompanion
+        afterCompanion = null
+        next?.invoke()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isCompanionAssociated(address: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+        val cdm = getSystemService(CompanionDeviceManager::class.java) ?: return false
+        // `associations` (MAC strings) is deprecated on 33+ in favour of
+        // `myAssociations`, but works on every level this feature runs on.
+        return runCatching { cdm.associations }.getOrDefault(emptyList())
+            .any { it.equals(address, ignoreCase = true) }
+    }
+
+    /**
+     * Ask Android to watch for the saved vehicle and wake the app when it appears.
+     *
+     * The first time per vehicle this shows the system "pair with this device?"
+     * dialog. That consent is what lets [dev.tvsopen.transport.VehiclePresenceService]
+     * start the ride service from the background when the vehicle is switched
+     * on — Android 12+ refuses that otherwise. Below Android 12 there is no
+     * presence API, and auto-connect relies on the background connect alone.
+     *
+     * The vehicle must be advertising, i.e. **not connected**, for the dialog
+     * to find it. [then] runs once this is over — accepted, declined, failed,
+     * or not needed at all — and is where the caller connects.
+     */
+    private fun setUpCompanion(address: String, then: () -> Unit = {}) {
+        afterCompanion = then
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return finishCompanion()
+        val prefs = RidePrefs.load(this)
+        if (!prefs.autoConnect) return finishCompanion()
+        val cdm = getSystemService(CompanionDeviceManager::class.java) ?: run {
+            Log.w("MainActivity", "no Companion Device Manager on this phone")
+            return finishCompanion()
+        }
+        if (isCompanionAssociated(address)) {
+            startObservingCompanion(address)
+            return finishCompanion()
+        }
+        prefs.markCompanionAsked(address)
+        val filter = BluetoothLeDeviceFilter.Builder()
+            .setScanFilter(ScanFilter.Builder().setDeviceAddress(address.uppercase()).build())
+            .build()
+        val request = AssociationRequest.Builder()
+            .addDeviceFilter(filter)
+            .setSingleDevice(true)
+            .build()
+        pendingCompanionAddress = address
+        val callback = object : CompanionDeviceManager.Callback() {
+            override fun onAssociationPending(intentSender: IntentSender) =
+                launchCompanionDialog(intentSender)
+
+            @Deprecated("Superseded by onAssociationPending on API 33+")
+            override fun onDeviceFound(intentSender: IntentSender) =
+                launchCompanionDialog(intentSender)
+
+            override fun onFailure(error: CharSequence?) {
+                pendingCompanionAddress = null
+                Log.w("MainActivity", "companion association failed: $error")
+                finishCompanion()
+            }
+        }
+        Log.i("MainActivity", "asking to associate the vehicle for auto-connect")
+        runCatching { cdm.associate(request, callback, null) }.onFailure {
+            pendingCompanionAddress = null
+            Log.w("MainActivity", "companion association refused: ${it.message}")
+            finishCompanion()
+        }
+    }
+
+    private fun launchCompanionDialog(sender: IntentSender) {
+        runCatching { companionLauncher.launch(IntentSenderRequest.Builder(sender).build()) }
+            .onFailure {
+                pendingCompanionAddress = null
+                Log.w("MainActivity", "could not show the companion dialog: ${it.message}")
+                finishCompanion()
+            }
+    }
+
+    /**
+     * Turning the Auto-connect switch on for a vehicle that has no companion
+     * association yet (declined, or never asked).
+     *
+     * The dialog can only find a vehicle that is advertising, so a live link is
+     * closed first, the dialog runs, and the vehicle is reconnected afterwards
+     * whatever the outcome.
+     */
+    private fun setUpAutoConnectForSavedVehicle() {
+        val address = RidePrefs.load(this).lastAddress ?: return
+        val live = Session.connection.value.state.let {
+            it == ConnectionState.CONNECTED || it == ConnectionState.CONNECTING
+        }
+        val startDialog = { setUpCompanion(address) { connectToRememberedCluster() } }
+        if (!live) {
+            startDialog()
+            return
+        }
+        Log.i("MainActivity", "disconnecting so the companion dialog can find the vehicle")
+        send(RideService.ACTION_DISCONNECT)
+        // Give the vehicle a moment to start advertising again after the link closes.
+        window.decorView.postDelayed({ startDialog() }, COMPANION_AFTER_DISCONNECT_MS)
+    }
+
+    @RequiresApi(Build.VERSION_CODES.S)
+    private fun startObservingCompanion(address: String) {
+        val cdm = getSystemService(CompanionDeviceManager::class.java) ?: return
+        runCatching { cdm.startObservingDevicePresence(address) }
+            .onSuccess {
+                RidePrefs.load(this).observedCompanion = address
+                Log.i("MainActivity", "Android is now watching for the vehicle")
+            }
+            .onFailure { Log.w("MainActivity", "could not watch for the vehicle: ${it.message}") }
+    }
+
+    private fun stopObservingCompanion(address: String) {
+        val prefs = RidePrefs.load(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(CompanionDeviceManager::class.java)?.let { cdm ->
+                runCatching { cdm.stopObservingDevicePresence(address) }
+            }
+        }
+        prefs.observedCompanion = null
+        Log.i("MainActivity", "stopped watching for the vehicle")
+    }
+
+    /**
+     * The More screen's Auto-connect switch.
+     *
+     * On: run the companion step for the saved vehicle if it still needs it
+     * (closing a live link first, see [setUpAutoConnectForSavedVehicle]), then
+     * connect. Off: stop watching for the vehicle; a live link is left alone.
+     */
+    private fun setAutoConnect(on: Boolean) {
+        val prefs = RidePrefs.load(this)
+        prefs.updateAutoConnect(on)
+        Log.i("MainActivity", "auto-connect ${if (on) "on" else "off"}")
+        val address = prefs.lastAddress ?: return
+        if (!on) {
+            stopObservingCompanion(address)
+            return
+        }
+        if (isCompanionAssociated(address)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) startObservingCompanion(address)
+            if (hasBlePermission() && Session.connection.value.state == ConnectionState.DISCONNECTED) {
+                connectToRememberedCluster()
+            }
+            return
+        }
+        setUpAutoConnectForSavedVehicle()
+    }
+
+    private fun bluetoothAdapter(): BluetoothAdapter? =
+        getSystemService(BluetoothManager::class.java)?.adapter
+
+    private fun isBluetoothOn(): Boolean = bluetoothAdapter()?.isEnabled == true
+
+    /**
+     * Run [then] with Bluetooth on, asking the user to turn it on first if needed.
+     *
+     * The app used to assume the radio was on: with it off, scanning found
+     * nothing and connecting did nothing, and no screen said why. This shows the
+     * system "Turn on Bluetooth?" dialog and carries on by itself once the user
+     * accepts. Callers must already hold the Bluetooth permissions — on Android
+     * 12+ `ACTION_REQUEST_ENABLE` itself needs `BLUETOOTH_CONNECT`.
+     */
+    private fun ensureBluetoothOn(then: () -> Unit) {
+        val adapter = bluetoothAdapter()
+        if (adapter == null) {
+            Log.w("MainActivity", "no Bluetooth adapter on this phone")
+            Toast.makeText(this, "This phone has no Bluetooth", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (adapter.isEnabled) {
+            then()
+            return
+        }
+        Log.i("MainActivity", "Bluetooth is off; asking the user to turn it on")
+        afterBluetoothOn = then
+        runCatching {
+            enableBluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+        }.onFailure {
+            afterBluetoothOn = null
+            Log.w("MainActivity", "could not show the Bluetooth prompt: ${it.message}")
+            Toast.makeText(this, "Turn on Bluetooth in Settings", Toast.LENGTH_LONG).show()
+        }
+    }
 
     /**
      * Whether this is the first launch, so every permission can be asked at once.
@@ -125,6 +384,10 @@ class MainActivity : AppCompatActivity() {
         missing += Manifest.permission.READ_PHONE_STATE
         missing += Manifest.permission.READ_CONTACTS
         missing += Manifest.permission.READ_CALL_LOG
+        // Handlebar end-call button and its reply SMS (Apache). Optional too:
+        // denying them leaves the button with the headset-key fallback, no SMS.
+        missing += Manifest.permission.ANSWER_PHONE_CALLS
+        missing += Manifest.permission.SEND_SMS
 
         // Request CALL_PHONE only when it is declared (it is intentionally not:
         // Android restricts it to the default dialer). READ_PHONE_STATE,
@@ -150,12 +413,7 @@ class MainActivity : AppCompatActivity() {
         // captured even before the ride service starts.
         Log.enableFileSink(java.io.File(filesDir, "logs"))
         ThemePrefs.load(this)
-        val ridePrefs = RidePrefs.load(this)
         Session.attachRideLog(applicationContext)
-        Session.loadParked(applicationContext)
-        // Restore the riding state so the toggle reflects what survived a
-        // restart rather than silently reverting to off.
-        Session.setRideMode(ridePrefs.rideMode)
         Log.i("App", "activity created; drivers registered; theme=${ThemePrefs.mode}")
 
         setContent {
@@ -164,7 +422,6 @@ class MainActivity : AppCompatActivity() {
             // colours and the inner one re-supplied them, so the two could
             // disagree after a theme change.
             AppRoot(
-                onFindMyChange = { send(it) },
                 onNavMirrorChange = { send(it) },
                 onScan = { openScanner() },
                 onDisconnect = { send(RideService.ACTION_DISCONNECT) },
@@ -177,27 +434,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Overview's Connect card: reconnect to the saved vehicle, or open the
+     * scanner when none has been chosen yet.
+     */
+    private fun connectOrScan() {
+        if (RidePrefs.load(this).lastAddress.isNullOrBlank()) {
+            openScanner()
+        } else if (!hasBlePermission()) {
+            requestBlePermissions()
+        } else {
+            connectToRememberedCluster()
+        }
+    }
+
     @Composable
     private fun AppRoot(
-        onFindMyChange: (String) -> Unit,
         onNavMirrorChange: (String) -> Unit,
         onScan: () -> Unit,
         onDisconnect: () -> Unit,
         onOpenNotificationAccess: () -> Unit,
         hasNotificationAccess: Boolean,
     ) {
-        var tab by rememberSaveable { mutableStateOf(0) }
-        var findMy by rememberSaveable { mutableStateOf(false) }
-        // On by default: mirroring is the app's reason to exist.
-        //
-        // It was false, so a rider who installed this, granted notification
-        // access, started a route and looked at the cluster saw nothing — with no
-        // indication that a switch existed to turn on. Asking for a feature
-        // twice is the wrong default when enabling it is free: the bridge does
-        // nothing until a maps app actually posts a navigation notification,
-        // and there is no cloud, account or network call involved.
-        //
-        // The toggle stays, because someone may want the cluster left alone.
+        // Overview is the first tab and the one the app opens on.
+        var tab by rememberSaveable { mutableStateOf(TAB_OVERVIEW) }
+        // On by default: the bridge does nothing until a maps app posts a
+        // navigation notification, so there is no cost to having it ready. The
+        // switch lives in More for anyone who wants the cluster left alone.
         var navMirroring by rememberSaveable {
             mutableStateOf(RidePrefs.load(this@MainActivity).navigationMirroring)
         }
@@ -214,21 +477,10 @@ class MainActivity : AppCompatActivity() {
         // activity only observes.
 
         // Start the mirror once a connection exists, because it defaults on.
-        //
-        // Without this the default was cosmetic: the switch showed "on" while
-        // nothing had been sent to the service, so the cluster showed no turn
-        // instructions and there was no reason visible for it.
-        //
         // Keyed on the connection state, so it fires on the transition to
-        // CONNECTED and not on every recomposition. `startNavigation` returns
-        // early if the bridge is already running, and the action is idempotent.
-        // Deliberately not fired while disconnected — asking the service to start
-        // a bridge it cannot write to would log a dropped write per tick, which is
-        // exactly the spam that was just fixed.
-        //
-        // Declared *after* `connection` on purpose: an earlier version sat above
-        // the collect calls and would not compile, because a local val cannot be
-        // read before its declaration.
+        // CONNECTED and not on every recomposition; `startNavigation` is
+        // idempotent. Not fired while disconnected, where the bridge would only
+        // log dropped writes.
         LaunchedEffect(connection.state, navMirroring) {
             if (navMirroring && connection.state == ConnectionState.CONNECTED) {
                 onNavMirrorChange(RideService.ACTION_START_NAV)
@@ -236,8 +488,6 @@ class MainActivity : AppCompatActivity() {
                 onNavMirrorChange(RideService.ACTION_STOP_NAV)
             }
         }
-        val parked by Session.parked.collectAsStateWithLifecycle()
-        val rideMode by Session.rideMode.collectAsStateWithLifecycle()
 
         TVSRideTheme(mode = ThemePrefs.mode, darkTheme = isSystemInDarkTheme()) {
             Scaffold(
@@ -248,26 +498,26 @@ class MainActivity : AppCompatActivity() {
                     // tab highlighted it and left you exactly where you were.
                     if (!scanning.value) NavigationBar {
                         NavigationBarItem(
-                            selected = tab == 0,
-                            onClick = { tab = 0 },
-                            icon = { Icon(Icons.Filled.Home, contentDescription = "Home") },
-                            label = { Text("Home") },
-                        )
-                        NavigationBarItem(
-                            selected = tab == 1,
-                            onClick = { tab = 1 },
-                            icon = { Icon(Icons.Filled.MoreHoriz, contentDescription = "More") },
-                            label = { Text("More") },
-                        )
-                        NavigationBarItem(
-                            selected = tab == 2,
-                            onClick = { tab = 2 },
+                            selected = tab == TAB_OVERVIEW,
+                            onClick = { tab = TAB_OVERVIEW },
                             icon = { Icon(Icons.Filled.Speed, contentDescription = "Overview") },
                             label = { Text("Overview") },
                         )
                         NavigationBarItem(
-                            selected = tab == 3,
-                            onClick = { tab = 3 },
+                            selected = tab == TAB_RIDES,
+                            onClick = { tab = TAB_RIDES },
+                            icon = { Icon(Icons.Filled.Route, contentDescription = "Rides") },
+                            label = { Text("Rides") },
+                        )
+                        NavigationBarItem(
+                            selected = tab == TAB_MORE,
+                            onClick = { tab = TAB_MORE },
+                            icon = { Icon(Icons.Filled.MoreHoriz, contentDescription = "More") },
+                            label = { Text("More") },
+                        )
+                        NavigationBarItem(
+                            selected = tab == TAB_LOG,
+                            onClick = { tab = TAB_LOG },
                             icon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = "Log") },
                             label = { Text("Log") },
                         )
@@ -289,62 +539,34 @@ class MainActivity : AppCompatActivity() {
                                     .updateSelectedModel(address, model.name)
                                 RidePrefs.load(this@MainActivity)
                                     .updateLastConnection(address, model.name)
-                                connectTo(address, model)
+                                // Companion dialog first, while the vehicle is
+                                // still advertising; connect once it closes.
+                                setUpCompanion(address) { connectTo(address, model) }
                             },
                             onBack = { scanning.value = false },
+                            onRequestBluetooth = {
+                                ensureBluetoothOn { scanner.start() }
+                            },
                         )
-                    } else if (tab == 0) {
-                        HomeScreen(
+                    } else when (tab) {
+                        TAB_OVERVIEW -> OverviewScreen(
                             telemetry = telemetry,
                             hud = hud,
                             connection = connection,
-                            parked = parked,
-                            rideMode = rideMode,
-                            findMyEnabled = findMy,
-                            navMirroring = navMirroring,
-                            onFindMyChange = { on ->
-                                findMy = on
-                                // Off used to send ACTION_FIND_MY too, so the
-                                // rider could never switch it back off from the
-                                // UI — the toggle started the action regardless
-                                // of its new value.
-                                onFindMyChange(
-                                    if (on) RideService.ACTION_FIND_MY
-                                    else RideService.ACTION_STOP_FIND_MY,
-                                )
-                            },
-                            onNavMirrorChange = { on ->
-                                navMirroring = on
-                                RidePrefs.load(this@MainActivity).navigationMirroring = on
-                                onNavMirrorChange(
-                                    if (on) RideService.ACTION_START_NAV
-                                    else RideService.ACTION_STOP_NAV,
-                                )
-                            },
-                            onRideModeChange = { on ->
-                                // No local copy to assign: `rideMode` above is
-                                // the collected Session flow, so pushing into
-                                // Session and the prefs is the whole update.
-                                // `this@MainActivity` because inside the Scaffold
-                                // content lambda a bare `this` is the BoxScope.
-                                RidePrefs.load(this@MainActivity).updateRideMode(on)
-                                Session.setRideMode(on)
-                            },
-                            onOpenOverview = { tab = 2 },
-                            onOpenParked = { tab = 2 },
-                            // The Connect card now opens the scanner. It used to
-                            // send ACTION_CONNECT with no address, which the
-                            // service logged and ignored — the only reason a
-                            // connection could never start.
-                            onConnect = { openScanner() },
+                            onConnect = { connectOrScan() },
+                            onDisconnect = onDisconnect,
+                            notificationAccessGranted = hasNotificationAccess,
+                            onGrantNotificationAccess = onOpenNotificationAccess,
                         )
-                    } else if (tab == 1) {
-                        MoreScreen(
-                            connection = connection,
-                            riderName = RidePrefs.load(this@MainActivity).riderName,
+                        TAB_RIDES -> RidesScreen(
                             rides = rides,
                             totalRides = totalRides,
-                            totalRideDistanceKm = totalRideDistanceKm,
+                            totalDistanceKm = totalRideDistanceKm,
+                        )
+                        TAB_MORE -> MoreScreen(
+                            connection = connection,
+                            hud = hud,
+                            riderName = RidePrefs.load(this@MainActivity).riderName,
                             onRiderNameChange = { name ->
                                 RidePrefs.load(this@MainActivity).riderName = name
                                 // Gate the send, not the save: without BLE
@@ -355,19 +577,30 @@ class MainActivity : AppCompatActivity() {
                                     send(RideService.ACTION_UPDATE_RIDER_NAME)
                                 }
                             },
+                            deviceNickname = RidePrefs.load(this@MainActivity).deviceNickname,
+                            onDeviceNicknameChange = { nickname ->
+                                RidePrefs.load(this@MainActivity).deviceNickname = nickname
+                                // Only worth waking the service when a link can
+                                // carry it; otherwise it goes out on next connect.
+                                if (hasBlePermission() && connection.state == ConnectionState.CONNECTED) {
+                                    send(RideService.ACTION_UPDATE_DEVICE_NAME)
+                                }
+                            },
+                            onAutoConnectChange = { on -> setAutoConnect(on) },
+                            navMirroring = navMirroring,
+                            onNavMirrorChange = { on ->
+                                navMirroring = on
+                                RidePrefs.load(this@MainActivity).navigationMirroring = on
+                                onNavMirrorChange(
+                                    if (on) RideService.ACTION_START_NAV
+                                    else RideService.ACTION_STOP_NAV,
+                                )
+                            },
                             notificationAccessGranted = hasNotificationAccess,
-                            onOpenNotificationAccess = onOpenNotificationAccess,
                             onScan = onScan,
                             onDisconnect = onDisconnect,
                         )
-                    } else if (tab == 2) {
-                        // Must match the nav bar order: Home, More, Overview,
-                        // Log. These two destinations were swapped, so tapping
-                        // Overview rendered the log and tapping Log rendered
-                        // the dashboard.
-                        OverviewScreen(telemetry = telemetry)
-                    } else {
-                        LogScreen()
+                        else -> LogScreen()
                     }
                 }
             }
@@ -438,14 +671,14 @@ class MainActivity : AppCompatActivity() {
         val prefs = RidePrefs.load(this)
         val address = prefs.lastAddress
         if (address.isNullOrBlank()) {
-            Toast.makeText(this, "No scooter chosen yet — tap Connect to scan", Toast.LENGTH_LONG)
+            Toast.makeText(this, "No vehicle chosen yet — tap Connect to scan", Toast.LENGTH_LONG)
                 .show()
             return
         }
         val model = prefs.lastModelId
             ?.let { runCatching { VehicleModel.valueOf(it) }.getOrNull() }
             ?: VehicleModel.NTORQ
-        connectTo(address, model)
+        ensureBluetoothOn { connectTo(address, model) }
     }
 
     private fun connectTo(address: String, model: VehicleModel) {
@@ -532,8 +765,12 @@ class MainActivity : AppCompatActivity() {
             requestBlePermissions()
             return
         }
-        scanner.start()
         scanning.value = true
+        // Starting with the radio off is deliberate: the scanner then records
+        // `bluetoothOff`, so if the user declines the prompt the scan screen
+        // explains why it is empty and offers the button again.
+        scanner.start()
+        if (!isBluetoothOn()) ensureBluetoothOn { scanner.start() }
     }
 
     /**
@@ -560,9 +797,17 @@ class MainActivity : AppCompatActivity() {
         val prefs = RidePrefs.load(this)
         if (prefs.lastAddress.isNullOrBlank()) {
             // Genuinely first run, or never connected. Say so once, because
-            // otherwise the Home screen just shows "Disconnected" with no
+            // otherwise Overview just shows "Disconnected" with no
             // explanation of why nothing is happening.
-            Log.i("MainActivity", "auto-connect skipped: no scooter stored yet")
+            Log.i("MainActivity", "auto-connect skipped: no vehicle stored yet")
+            return
+        }
+        // Already linked (or linking), e.g. auto-connect brought the vehicle in
+        // while the app was closed. Connecting again would tear that link down
+        // and rebuild it, which is what opening the app used to do.
+        val current = Session.connection.value
+        if (current.state == ConnectionState.CONNECTED || current.state == ConnectionState.CONNECTING) {
+            Log.i("MainActivity", "auto-connect skipped: already ${current.state.label.lowercase()}")
             return
         }
         val model = prefs.lastModelId
@@ -570,6 +815,8 @@ class MainActivity : AppCompatActivity() {
             ?: VehicleModel.NTORQ
         Log.i("MainActivity", "auto-connecting to ${model.displayName}")
         connectToRememberedCluster()
+        // No companion dialog here: it can only find a vehicle that is not
+        // connected, and this is about to connect. More offers it instead.
     }
 
     private fun hasNotificationAccess(): Boolean =
@@ -587,5 +834,14 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         const val PREFS = "tvsride"
         const val KEY_FIRST_RUN = "first_run_complete"
+
+        // Bottom tabs, in display order.
+        const val TAB_OVERVIEW = 0
+        const val TAB_RIDES = 1
+        const val TAB_MORE = 2
+        const val TAB_LOG = 3
+
+        /** Pause after closing a link before the companion dialog searches for the vehicle. */
+        const val COMPANION_AFTER_DISCONNECT_MS = 1_500L
     }
 }

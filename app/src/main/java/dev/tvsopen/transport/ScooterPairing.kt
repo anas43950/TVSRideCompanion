@@ -190,7 +190,8 @@ class ScooterPairing(private val context: Context) {
         "Turn the ignition on",
         "Hold the MODE button on the switchgear for about 5 seconds",
         "The cluster screen should show “BT Pair” — that is the signal to scan",
-        "The scooter appears as “TVS BT…” — pick it, pair, then connect",
+        "Your vehicle appears as “TVS…” (for example “TVS BT…” or “TVS2509…”) — pick it, pair, then connect",
+        "If the cluster shows a PIN while pairing, type that PIN on the phone",
         "Still nothing? Disconnect the battery and reconnect it, which also " +
             "forces pair mode",
     )
@@ -207,9 +208,9 @@ class ScooterPairing(private val context: Context) {
      */
     private fun describeReason(reason: Int): String = when (reason) {
         REASON_DISCONNECTED ->
-            "Disconnected while pairing — the scooter may have left pair mode"
+            "Disconnected while pairing — the vehicle may have left pair mode"
         REASON_AUTH_FAILED -> "Authentication failed; forget the device and pair again"
-        REASON_AUTH_REJECTED -> "The scooter rejected the pairing request"
+        REASON_AUTH_REJECTED -> "The vehicle rejected the pairing request"
         else -> "Pairing failed (reason $reason)"
     }
 

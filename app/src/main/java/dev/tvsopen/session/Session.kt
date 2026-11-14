@@ -6,8 +6,6 @@
 
 package dev.tvsopen.session
 
-import android.content.Context
-import dev.tvsopen.prefs.RidePrefs
 import dev.tvsopen.protocol.DecodedFrame
 import dev.tvsopen.protocol.DriverRegistry
 import dev.tvsopen.protocol.Field
@@ -47,6 +45,10 @@ data class Telemetry(
     val distanceToEmptyKm: Int? = null,   // SM3 idx 11..12
     val engineTempC: Int? = null,         // SM4 idx 8
     val batteryVoltage: Int? = null,      // SM4 idx 11
+    /** Gear from the Apache's `P` record: 0 is neutral. */
+    val gear: Int? = null,
+    /** The cluster's low-fuel state (Apache: fuel byte below 2, as the official app reads it). */
+    val lowFuel: Boolean? = null,
     val lastFrameAt: Long = 0L,
     /**
      * Odometer reading when this link was established.
@@ -77,7 +79,14 @@ data class Telemetry(
         const val STALE_AFTER_MS = 10_000L
 
         /** Bars in the Ntorq 125 cluster's fuel gauge. TVS manual, section 1c. */
-        const val FUEL_BAR_MAX = 6
+        const val NTORQ_FUEL_BAR_MAX = 6
+
+        /**
+         * Bars on the gauge this app draws: the Apache RTR 160 4V cluster has
+         * eight (seen on the rider's bike, 2026-11-14). This branch targets
+         * that bike, so the gauge follows it.
+         */
+        const val FUEL_BAR_MAX = 8
     }
 }
 
@@ -118,19 +127,6 @@ data class ConnectionState1(
 )
 
 /**
- * Where the scooter was last seen.
- *
- * There is no cloud in this project, so this cannot be a server-side record.
- * It is written locally when the phone has a fix while the cluster is connected,
- * and it never leaves the device — there is no permission that would let it.
- */
-data class ParkedInfo(
-    val atMillis: Long,
-    val label: String? = null,
-    val distanceMeters: Int? = null,
-)
-
-/**
  * Session store.
  *
  * Mutable rather than a ViewModel: the BLE service and the notification
@@ -151,12 +147,6 @@ object Session {
 
     private val _connection = MutableStateFlow(ConnectionState1())
     val connection: StateFlow<ConnectionState1> = _connection.asStateFlow()
-
-    private val _parked = MutableStateFlow<ParkedInfo?>(null)
-    val parked: StateFlow<ParkedInfo?> = _parked.asStateFlow()
-
-    private val _rideMode = MutableStateFlow(false)
-    val rideMode: StateFlow<Boolean> = _rideMode.asStateFlow()
 
     /**
      * Local ride log, created once the Activity supplies a Context.
@@ -188,25 +178,22 @@ object Session {
         }
     }
 
-    /** Keep the open ride's distance in step with the odometer. */
+    /**
+     * Feed the open ride the odometer and speed. The ride measures distance
+     * from its own first odometer reading, not this connection's, so a
+     * reconnect that joins the ride keeps what was ridden in between.
+     */
     private fun trackRideDistance() {
         val log = rideLog ?: return
-        // connectedDistanceKm() is a Telemetry member, not a Session one, so the
-        // receiver has to be spelled out.
-        log.update(_telemetry.value.connectedDistanceKm() ?: 0.0)
+        val t = _telemetry.value
+        log.update(t.odometerKm, t.speedKmh)
         _rides.value = log.rides.value
     }
 
-    fun setRideMode(on: Boolean) { _rideMode.value = on }
-
-    fun onParked(info: ParkedInfo) { _parked.value = info }
-
-    fun loadParked(context: Context) {
-        val p = RidePrefs.load(context)
-        val at = p.parkedAtMillis
-        if (at > 0L) {
-            _parked.value = ParkedInfo(atMillis = at, label = p.parkedLabel, distanceMeters = null)
-        }
+    private fun refreshRideTotals(log: RideLog) {
+        _rides.value = log.rides.value
+        _totalRides.value = log.totalRides
+        _totalRideDistanceKm.value = log.totalDistanceKm
     }
 
     fun reset() {
@@ -227,12 +214,11 @@ object Session {
         // onFrame fills it from the first 0x10 that carries an odometer.
         if (isConnected && !wasConnected) {
             _telemetry.value = _telemetry.value.copy(odometerAtConnectKm = null)
-            rideLog?.start()
+            // Rejoining a counted ride takes it back out of the totals.
+            rideLog?.let { it.start(); refreshRideTotals(it) }
         }
         if (!isConnected && wasConnected) {
-            rideLog?.finish()
-            _totalRides.value = rideLog?.totalRides ?: _totalRides.value
-            _totalRideDistanceKm.value = rideLog?.totalDistanceKm ?: _totalRideDistanceKm.value
+            rideLog?.let { it.finish(); refreshRideTotals(it) }
         }
 
         _connection.value = ConnectionState1(state, model, address)
@@ -287,7 +273,7 @@ object Session {
                 // to clear the previous one, not leave a stale level on screen.
                 fuelBars = frame.field(Field.FUEL_LEVEL)?.toInt()
                     ?.let { if (fuelLowNibble) it and 0x0F else it }
-                    ?.takeIf { it in 0..Telemetry.FUEL_BAR_MAX },
+                    ?.takeIf { it in 0..Telemetry.NTORQ_FUEL_BAR_MAX },
                 averageSpeedKmh = frame.field(Field.AVERAGE_SPEED)?.toInt() ?: cur.averageSpeedKmh,
                 tripStatus = frame.field(Field.TRIP_STATUS)?.toInt() ?: cur.tripStatus,
                 topSpeedKmh = frame.field(Field.TOP_SPEED)?.toInt() ?: cur.topSpeedKmh,
@@ -297,6 +283,33 @@ object Session {
                     ?: cur.timeTo60Sec,
                 tripFMeters = scaled(Field.TRIP_F_METER, 10.0)?.toInt() ?: cur.tripFMeters,
                 engineRpm = frame.field(Field.ENGINE_RPM)?.toInt() ?: cur.engineRpm,
+                lastFrameAt = now,
+            ).also { trackRideDistance() }
+
+            // Apache N112. Each notification carries only a few records (most
+            // are just the `V` heartbeat), so every field keeps its last value
+            // when absent — unlike 0x10, which carries the full set every time.
+            //
+            // The warning-lamp byte is decoded but not shown: it alternates
+            // 00/02 every half second at idle, so its meaning needs confirming
+            // first. Fuel maps through ApacheN112Driver.fuelBars (8-bar gauge).
+            dev.tvsopen.protocol.ApacheN112Driver.RECORDS_DATA_ID -> cur.copy(
+                speedKmh = frame.field(Field.SPEED)?.toInt() ?: cur.speedKmh,
+                gear = frame.field(Field.GEAR_POSITION)?.toInt() ?: cur.gear,
+                fuelBars = frame.field(Field.FUEL_LEVEL)
+                    ?.let { dev.tvsopen.protocol.ApacheN112Driver.fuelBars(it.toInt()) }
+                    ?: cur.fuelBars,
+                lowFuel = frame.field(Field.FUEL_LEVEL)
+                    ?.let { dev.tvsopen.protocol.ApacheN112Driver.isLowFuel(it.toInt()) }
+                    ?: cur.lowFuel,
+                odometerKm = scaled(Field.ODOMETER, 10.0) ?: cur.odometerKm,
+                odometerAtConnectKm = cur.odometerAtConnectKm
+                    ?: scaled(Field.ODOMETER, 10.0),
+                averageSpeedKmh = frame.field(Field.AVERAGE_SPEED)?.toInt() ?: cur.averageSpeedKmh,
+                topSpeedKmh = frame.field(Field.TOP_SPEED)?.toInt() ?: cur.topSpeedKmh,
+                engineRpm = frame.field(Field.ENGINE_RPM)?.toInt() ?: cur.engineRpm,
+                distanceToEmptyKm = frame.field(Field.DISTANCE_TO_EMPTY)?.toInt()
+                    ?: cur.distanceToEmptyKm,
                 lastFrameAt = now,
             ).also { trackRideDistance() }
 
@@ -337,6 +350,15 @@ object Session {
     }
 
     /** Post or clear the active cluster alert (call/message). */
+    private val _unreadSms = MutableStateFlow(0)
+
+    /** SMS notifications still in the shade, for the cluster's unread marker. */
+    val unreadSms: StateFlow<Int> = _unreadSms.asStateFlow()
+
+    fun setUnreadSms(count: Int) {
+        _unreadSms.value = count.coerceAtLeast(0)
+    }
+
     fun onAlert(alert: ClusterAlert?) {
         _alert.value = alert
     }

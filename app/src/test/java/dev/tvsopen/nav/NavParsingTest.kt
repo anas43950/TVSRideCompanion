@@ -9,6 +9,7 @@
 package dev.tvsopen.nav
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -171,5 +172,26 @@ class NavParsingTest {
         assertEquals(-1, p.distanceMeters)
         assertEquals(0, p.etaMinutes)
         assertTrue(p.maneuver.isNotEmpty())
+    }
+
+    // --- Which notifications count as navigation -----------------------------
+
+    private val maps = setOf("com.google.android.apps.maps")
+
+    @Test
+    fun `the charging notification is not navigation`() {
+        // "Charging (36 m until full)" parses a 36 m distance; it used to be
+        // mirrored to the cluster as a turn.
+        assertFalse(NavParsing.isNavigation("com.android.systemui", ongoing = true, mapsPackages = maps))
+    }
+
+    @Test
+    fun `an ongoing maps notification is navigation`() {
+        assertTrue(NavParsing.isNavigation("com.google.android.apps.maps", ongoing = true, mapsPackages = maps))
+    }
+
+    @Test
+    fun `a dismissable maps notification is not navigation`() {
+        assertFalse(NavParsing.isNavigation("com.google.android.apps.maps", ongoing = false, mapsPackages = maps))
     }
 }

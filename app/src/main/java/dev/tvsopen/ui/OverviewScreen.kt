@@ -14,23 +14,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.LocalGasStation
 import androidx.compose.material.icons.filled.Route
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.Thermostat
-import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -39,57 +39,86 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.tvsopen.session.ConnectionState1
+import dev.tvsopen.session.HudState
 import dev.tvsopen.session.Telemetry
+import dev.tvsopen.transport.ConnectionState
+import dev.tvsopen.transport.label
 import dev.tvsopen.ui.theme.LocalTilePalette
 import dev.tvsopen.ui.theme.NumberStyle
 
 /**
- * Vehicle Overview.
+ * Overview: the app's main screen.
  *
- * Laid out from what TVS's own app shows for an Ntorq: top speed, top RPM, best
- * 0-60, the fuel gauge, then distance travelled.
+ * Built for the Apache RTR 160 4V, the vehicle this branch targets: only what
+ * its cluster actually sends is shown. Live speed and gear, top speed and
+ * engine RPM, the 8-bar fuel gauge, and distance. The Ntorq-only tiles
+ * (battery voltage, coolant, fuel economy, firmware, best 0–60, service,
+ * check engine, range) never arrive from this bike and were removed.
  *
- * ## Why these and not the old tile grid
+ * Connection state and the Connect button sit at the top, because with no Home
+ * tab this is the first thing the app shows.
  *
- * The previous dashboard put six values in a 2+3 tile grid. Those are the same
- * six quantities — they are real cluster display elements, per TVS's Ntorq 125
- * manual (odometer 1a, fuel 1c, speedometer 1d, engine temperature 1e, service
- * 1h, trip A/B/F 1k) — but a glanceable tile is the wrong shape for them. This
- * screen groups them the way the hardware presents them and adds the two the
- * official app shows that we can also produce locally.
- *
- * ## What is absent, and why
- *
- * The official Overview has a **Ride mode** selector (Race / Race x Street /
- * Street). Ride modes are server-side in TVS's app, tied to an account and a
- * ride history. This project has neither, so there is no mode to select. A
- * control that cannot do anything is worse than an absent one.
- *
- * "Total Rides" and the ride list are also cloud data and are not shown.
+ * Every absent value renders as an em dash. A `0` would be a lie: it would mean
+ * the UI invented a reading rather than reporting that nothing arrived.
  */
 @Composable
 fun OverviewScreen(
     telemetry: Telemetry,
+    hud: HudState,
+    connection: ConnectionState1,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    /** Calls, SMS and navigation all arrive as notifications. */
+    notificationAccessGranted: Boolean,
+    onGrantNotificationAccess: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val connected = connection.state == ConnectionState.CONNECTED
+
     Column(
         modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
     ) {
-        Spacer(Modifier.height(18.dp))
-        Text("Vehicle Overview", style = MaterialTheme.typography.headlineLarge)
-        Text(
-            "Live from the instrument cluster",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Header(connection, connected)
+
+        if (!notificationAccessGranted) {
+            Spacer(Modifier.height(10.dp))
+            NotificationAccessBanner(onGrantNotificationAccess)
+        }
+
+        if (hud.active) {
+            Spacer(Modifier.height(10.dp))
+            NavigationStrip(hud)
+        }
+
+        Spacer(Modifier.height(14.dp))
+        ConnectCard(connected, connection.state.label, telemetry, onConnect, onDisconnect)
 
         Spacer(Modifier.height(20.dp))
+        SectionLabel("Live")
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            BigStat(
+                Modifier.weight(1f),
+                Icons.Filled.Speed,
+                telemetry.speedKmh?.toString() ?: "—",
+                "km/h",
+                "Speed",
+                LocalTilePalette.current.largeLeft,
+            )
+            BigStat(
+                Modifier.weight(1f),
+                Icons.Filled.Settings,
+                gearLabel(telemetry.gear),
+                "",
+                "Gear",
+                LocalTilePalette.current.largeRight,
+            )
+        }
 
-        // The three headline figures, as the official app shows them flanking
-        // the cluster graphic.
+        Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             BigStat(
                 Modifier.weight(1f),
@@ -97,35 +126,22 @@ fun OverviewScreen(
                 telemetry.topSpeedKmh?.toString() ?: "—",
                 "km/h",
                 "Top Speed",
-                LocalTilePalette.current.largeLeft,
+                LocalTilePalette.current.neutral,
             )
             BigStat(
                 Modifier.weight(1f),
                 Icons.Filled.Bolt,
                 telemetry.engineRpm?.toString() ?: "—",
                 "rpm",
-                // Not "Top RPM": this is the current engine speed from 0x10
-                // bytes 17-18. Only the speed tile is a top-speed field, and
-                // that is because the cluster sends one, not because we
-                // compute it.
+                // Current engine speed, not a peak.
                 "Engine RPM",
-                LocalTilePalette.current.largeRight,
+                LocalTilePalette.current.neutral,
             )
         }
 
-        Spacer(Modifier.height(12.dp))
-        BigStat(
-            Modifier.fillMaxWidth(),
-            Icons.Filled.Timer,
-            telemetry.timeTo60Sec?.let { String.format("%.1f", it) } ?: "—",
-            "sec",
-            "Best 0–60",
-            LocalTilePalette.current.neutral,
-        )
-
         Spacer(Modifier.height(20.dp))
         SectionLabel("Fuel")
-        FuelGauge(telemetry.fuelBars)
+        FuelGauge(telemetry.fuelBars, telemetry.lowFuel == true)
 
         Spacer(Modifier.height(20.dp))
         SectionLabel("Distance Travelled")
@@ -135,89 +151,197 @@ fun OverviewScreen(
                 Modifier.weight(1f),
                 Icons.Filled.Route,
                 telemetry.odometerKm?.let { String.format("%.1f", it) } ?: "—",
-                "Total distance",
+                "Total distance (km)",
             )
             DistanceStat(
                 Modifier.weight(1f),
                 Icons.Filled.Route,
                 telemetry.connectedDistanceKm()
                     ?.let { String.format("%.1f", it) } ?: "—",
-                "This connection",
-            )
-        }
-
-        Spacer(Modifier.height(20.dp))
-        SectionLabel("Cluster telemetry")
-
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.BatteryChargingFull,
-                telemetry.batteryVoltage?.let { String.format("%.1f", it / 10.0) } ?: "—",
-                "Battery (V)",
-            )
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.Thermostat,
-                telemetry.engineTempC?.toString() ?: "—",
-                "Coolant (°C)",
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.LocalGasStation,
-                telemetry.distanceToEmptyKm?.toString() ?: "—",
-                "Range (km)",
-            )
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.Build,
-                when (telemetry.serviceDue) {
-                    true -> "Due"
-                    false -> "OK"
-                    null -> "—"
-                },
-                "Service",
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.Warning,
-                when (telemetry.milOn) {
-                    true -> telemetry.milBlinkCode?.takeIf { it > 0 }?.let { "On ($it)" } ?: "On"
-                    false -> "Off"
-                    null -> "—"
-                },
-                "Check engine",
-            )
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.Speed,
-                telemetry.avgEconomyKmpl?.let { "$it kmpl" } ?: "—",
-                "Avg economy",
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.Speed,
-                telemetry.instantEconomyKmpl?.let { "$it kmpl" } ?: "—",
-                "Instant economy",
-            )
-            DistanceStat(
-                Modifier.weight(1f),
-                Icons.Filled.Build,
-                telemetry.softwareVersion ?: "—",
-                "Firmware",
+                "This connection (km)",
             )
         }
 
         Spacer(Modifier.height(28.dp))
+    }
+}
+
+/** `N` for neutral (0), the gear number otherwise, `—` with no reading. */
+internal fun gearLabel(gear: Int?): String = when (gear) {
+    null -> "—"
+    0 -> "N"
+    else -> gear.toString()
+}
+
+@Composable
+private fun Header(connection: ConnectionState1, connected: Boolean) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("TVSRide", style = MaterialTheme.typography.headlineLarge)
+            Text(
+                connection.model.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Pill(if (connected) "Connected" else connection.state.label, connected)
+        Spacer(Modifier.width(8.dp))
+        Box(
+            Modifier
+                .size(36.dp)
+                .background(
+                    if (connected) LocalTilePalette.current.connected
+                    else MaterialTheme.colorScheme.outline,
+                    CircleShape,
+                ),
+        )
+    }
+}
+
+@Composable
+private fun Pill(text: String, on: Boolean) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = if (on) LocalTilePalette.current.accent
+        else MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.Bluetooth,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+/**
+ * Connect when there is no link; when there is, say how fresh the data is and
+ * offer Disconnect.
+ *
+ * Freshness is the single most useful "is this actually working" signal: the
+ * tiles keep their last values, so without it the screen looks identical
+ * whether the link is streaming or died a minute ago.
+ */
+@Composable
+private fun ConnectCard(
+    connected: Boolean,
+    stateLabel: String,
+    telemetry: Telemetry,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+) {
+    val age = remember(telemetry.lastFrameAt) {
+        if (telemetry.lastFrameAt == 0L) null
+        else System.currentTimeMillis() - telemetry.lastFrameAt
+    }
+    val content: @Composable () -> Unit = {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Bluetooth,
+                contentDescription = null,
+                modifier = Modifier.size(26.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (connected) "Connected" else "Connect",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    if (!connected) stateLabel
+                    else when {
+                        age == null -> "No data received yet"
+                        age < 3_000 -> "Data live"
+                        age < Telemetry.STALE_AFTER_MS -> "Data ${age / 1000}s old"
+                        else -> "Data stale — ${age / 1000}s since last"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (connected) {
+                OutlinedButton(onClick = onDisconnect) { Text("Disconnect") }
+            }
+        }
+    }
+    // Only the disconnected card is tappable as a whole: a stray tap on a live
+    // card must not drop the link, so that needs the explicit button.
+    if (connected) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            color = LocalTilePalette.current.accent,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            content = content,
+        )
+    } else {
+        Surface(
+            onClick = onConnect,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            color = LocalTilePalette.current.accent,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            content = content,
+        )
+    }
+}
+
+@Composable
+private fun NavigationStrip(hud: HudState) {
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            // Both fields are skipped when blank rather than defaulted. Google
+            // Maps puts the distance in the title, so the title is legitimately
+            // empty once that is moved to the distance row.
+            hud.instructionTitle?.takeIf { it.isNotBlank() }?.let {
+                val arrow = dev.tvsopen.nav.NavShortCodes.uiArrow(hud.pictogramId)
+                Text(
+                    if (arrow.isNotEmpty()) "$arrow $it" else it,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+            hud.street?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+            // -1 is the "no distance in the notification" sentinel; never
+            // render it as a figure.
+            val distance = hud.distanceMeters
+            Text(
+                if (distance >= 0) "$distance m · ${hud.etaMinutes} min"
+                else "${hud.etaMinutes} min to arrival",
+                style = NumberStyle,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        }
     }
 }
 
@@ -271,13 +395,15 @@ private fun BigStat(
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                 )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    unit,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(bottom = 5.dp),
-                )
+                if (unit.isNotEmpty()) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        unit,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(bottom = 5.dp),
+                    )
+                }
             }
             Text(
                 label,
@@ -325,15 +451,15 @@ private fun DistanceStat(
 }
 
 /**
- * Six-segment fuel gauge.
+ * Eight-segment fuel gauge, as on the RTR 160 4V cluster.
  *
- * Six, not five, because TVS's manual says six for this cluster — and a
- * clamp at five silently discarded a full tank. Segments fill from the E side,
- * matching the official app's E…F bar. Renders as dashes rather than a filled
- * bar so "no data" and "empty" cannot be confused.
+ * The mapping from the bike's fuel byte rests on one reading so far (full tank
+ * reads 9 → 8 bars; see ApacheN112Driver.fuelBars). Segments fill from the E
+ * side. "No reading" renders differently from "empty" so the two cannot be
+ * confused.
  */
 @Composable
-private fun FuelGauge(bars: Int?) {
+private fun FuelGauge(bars: Int?, low: Boolean) {
     val filled = bars ?: 0
     Surface(
         Modifier.fillMaxWidth(),
@@ -361,10 +487,12 @@ private fun FuelGauge(bars: Int?) {
                                 .weight(1f)
                                 .height(22.dp)
                                 .background(
-                                    if (bars != null && i < filled)
-                                        MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.outline
-                                        .copy(alpha = 0.35f),
+                                    when {
+                                        bars == null || i >= filled ->
+                                            MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                        low -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.primary
+                                    },
                                     RoundedCornerShape(4.dp),
                                 ),
                         )
@@ -379,17 +507,45 @@ private fun FuelGauge(bars: Int?) {
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                // Three states, not two: a real level, no frame at all yet, and
-                // a frame whose value is outside the six-bar gauge and so cannot
-                // be a bar count. Collapsing the third into the second would
-                // report a level the cluster never sent.
-                if (bars != null) "$filled of ${Telemetry.FUEL_BAR_MAX} bars"
-                else "No usable reading",
+                when {
+                    bars == null -> "No reading yet"
+                    low -> "Low fuel — $filled of ${Telemetry.FUEL_BAR_MAX} bars"
+                    else -> "$filled of ${Telemetry.FUEL_BAR_MAX} bars"
+                },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (low) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+    }
+}
+
+/**
+ * Shown until notification access is granted, then gone. Without it the
+ * cluster gets no incoming calls, SMS or navigation, and a reinstall always
+ * loses it: it is a system setting, not a permission a popup can restore.
+ */
+@Composable
+private fun NotificationAccessBanner(onGrant: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Notification access is off",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Text(
+                "Incoming calls, SMS and navigation can't reach your vehicle until you allow it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Button(onClick = onGrant) { Text("Grant notification access") }
         }
     }
 }

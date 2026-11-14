@@ -61,6 +61,13 @@ enum class VehicleModel(
      * `protocol/raider` only adds `5A54ACK`/`5A6B`/`5A9D` frames — a
      * superset, not a separate protocol. So the Ntorq driver serves Raider too.
      */
+    /**
+     * Apache variants. Which protocol one speaks is decided by the Bluetooth
+     * service it offers ([GattProfile]), not by this: an Apache with the `5500`
+     * service uses [ApacheN112Driver], one with the SmartXonnect service does not.
+     */
+    fun isApache(): Boolean = this == APACHE_160 || this == APACHE_180
+
     fun sharesNtorqProtocol(): Boolean =
         this == NTORQ || this == NTORQ_125_RACE || this == RAIDER_125 || this == RAIDER_180
 

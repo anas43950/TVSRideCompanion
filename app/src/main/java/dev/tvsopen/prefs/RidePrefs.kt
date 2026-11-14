@@ -15,27 +15,27 @@ class RidePrefs private constructor(private val ctx: Context) {
 
     private val sp = ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
 
-    /** Observable for Compose. */
-    var rideMode by mutableStateOf(sp.getBoolean(KEY_RIDE_MODE, false))
-        private set
-
-    /** True when the user opted into reconnecting after a reboot. */
-    var resumeOnBoot by mutableStateOf(sp.getBoolean(KEY_RESUME_BOOT, false))
+    /**
+     * Connect to the saved vehicle on its own: when it is switched on, after a
+     * reboot, after Bluetooth comes back, and after a dropped link.
+     * On by default: connecting to the vehicle you already chose is what the
+     * app is for.
+     */
+    var autoConnect by mutableStateOf(
+        resolveAutoConnect(
+            stored = if (sp.contains(KEY_AUTO_CONNECT)) sp.getBoolean(KEY_AUTO_CONNECT, true) else null,
+        ),
+    )
         private set
 
     /**
      * Named `updateX`, not `setX`: a `private set` on a delegated `var` already
-     * generates a `setX(Z)V` method, so a `fun setRideMode(Boolean)` collides
+     * generates a `setX(Z)V` method, so a `fun setAutoConnect(Boolean)` collides
      * with it at the JVM signature level and fails the build.
      */
-    fun updateRideMode(on: Boolean) {
-        rideMode = on
-        sp.edit().putBoolean(KEY_RIDE_MODE, on).apply()
-    }
-
-    fun updateResumeOnBoot(on: Boolean) {
-        resumeOnBoot = on
-        sp.edit().putBoolean(KEY_RESUME_BOOT, on).apply()
+    fun updateAutoConnect(on: Boolean) {
+        autoConnect = on
+        sp.edit().putBoolean(KEY_AUTO_CONNECT, on).apply()
     }
 
     /**
@@ -63,6 +63,56 @@ class RidePrefs private constructor(private val ctx: Context) {
 
     fun selectedModel(address: String): String? = sp.getString(modelKey(address), null)
 
+    /**
+     * The Bluetooth layout ([dev.tvsopen.protocol.GattProfile.id]) last
+     * detected on this vehicle, so the next connection starts with the right
+     * driver instead of discovering it and reconnecting.
+     */
+    fun detectedProfile(address: String): String? = sp.getString(profileKey(address), null)
+
+    fun updateDetectedProfile(address: String, profileId: String) {
+        sp.edit().putString(profileKey(address), profileId).apply()
+    }
+
+    /**
+     * Whether the rider has already been shown the companion-device dialog for
+     * this vehicle, so declining it is not answered with the same dialog on
+     * every launch. Turning auto-connect on asks again regardless.
+     */
+    fun companionAsked(address: String): Boolean = sp.getBoolean(companionAskedKey(address), false)
+
+    fun markCompanionAsked(address: String) {
+        sp.edit().putBoolean(companionAskedKey(address), true).apply()
+    }
+
+    /**
+     * The vehicle Companion Device Manager is currently watching for, if any.
+     *
+     * While set, the ride service can stop after a drop instead of waiting in
+     * the background with a notification up: the system wakes the app when the
+     * vehicle reappears.
+     */
+    var observedCompanion: String?
+        get() = sp.getString(KEY_OBSERVED_COMPANION, null)
+        set(value) {
+            sp.edit().apply {
+                if (value == null) remove(KEY_OBSERVED_COMPANION) else putString(KEY_OBSERVED_COMPANION, value)
+            }.apply()
+        }
+
+    /**
+     * Name of this phone as the cluster shows it: the Apache N112's `V` frame
+     * reads "Connected to <name>".
+     */
+    var deviceNickname: String?
+        get() = sp.getString(KEY_DEVICE_NICKNAME, null)
+        set(value) {
+            val trimmed = value?.trim()?.take(MAX_NICKNAME_CHARS)?.takeIf { it.isNotEmpty() }
+            sp.edit().apply {
+                if (trimmed == null) remove(KEY_DEVICE_NICKNAME) else putString(KEY_DEVICE_NICKNAME, trimmed)
+            }.apply()
+        }
+
     /** Scan preference; default is unfiltered because the Ntorq advertises no UUID. */
     var onlySmartXonnect: Boolean
         get() = sp.getBoolean(KEY_ONLY_SMART_XONNECT, false)
@@ -83,6 +133,24 @@ class RidePrefs private constructor(private val ctx: Context) {
         get() = sp.getBoolean(KEY_MIRROR_MESSAGES, false)
         set(value) { sp.edit().putBoolean(KEY_MIRROR_MESSAGES, value).apply() }
 
+    /**
+     * Text a caller gets when the handlebar button rejects their call. On by
+     * default; contacts only (see CallReply).
+     */
+    var callReplyEnabled: Boolean
+        get() = sp.getBoolean(KEY_CALL_REPLY_ENABLED, true)
+        set(value) { sp.edit().putBoolean(KEY_CALL_REPLY_ENABLED, value).apply() }
+
+    /** The reply text; null (the default) means [DEFAULT_CALL_REPLY]. */
+    var callReplyText: String?
+        get() = sp.getString(KEY_CALL_REPLY_TEXT, null)
+        set(value) {
+            val trimmed = value?.trim()?.takeIf { it.isNotEmpty() }
+            sp.edit().apply {
+                if (trimmed == null) remove(KEY_CALL_REPLY_TEXT) else putString(KEY_CALL_REPLY_TEXT, trimmed)
+            }.apply()
+        }
+
     /** Local profile name; UI can edit it without sending an unverified packet. */
     var riderName: String?
         get() = sp.getString(KEY_RIDER_NAME, null)
@@ -93,26 +161,8 @@ class RidePrefs private constructor(private val ctx: Context) {
             }.apply()
         }
 
-    /** Last known parked spot, recorded locally when the link drops. */
-    var parkedAtMillis: Long
-        get() = sp.getLong(KEY_PARKED_AT, 0L)
-        private set(value) { sp.edit().putLong(KEY_PARKED_AT, value).apply() }
-
-    var parkedLabel: String?
-        get() = sp.getString(KEY_PARKED_LABEL, null)
-        private set(value) { sp.edit().putString(KEY_PARKED_LABEL, value).apply() }
-
-    fun saveParked(atMillis: Long, label: String?) {
-        sp.edit()
-            .putLong(KEY_PARKED_AT, atMillis)
-            .putString(KEY_PARKED_LABEL, label)
-            .apply()
-    }
-
     companion object {
         private const val NAME = "tvsride"
-        private const val KEY_RIDE_MODE = "ride_mode"
-        private const val KEY_RESUME_BOOT = "resume_on_boot"
         private const val KEY_LAST_ADDRESS = "last_address"
         private const val KEY_LAST_MODEL = "last_model"
         private const val KEY_RIDER_NAME = "rider_name"
@@ -120,11 +170,27 @@ class RidePrefs private constructor(private val ctx: Context) {
         private const val KEY_NAVIGATION_MIRRORING = "navigation_mirroring"
         private const val KEY_MIRROR_PHONE_CALLS = "mirror_phone_calls"
         private const val KEY_MIRROR_MESSAGES = "mirror_messages"
-        private const val KEY_PARKED_AT = "parked_at"
-        private const val KEY_PARKED_LABEL = "parked_label"
+        private const val KEY_CALL_REPLY_ENABLED = "call_reply_enabled"
+        private const val KEY_CALL_REPLY_TEXT = "call_reply_text"
+        const val DEFAULT_CALL_REPLY = "Riding the bike currently, call again if it's urgent."
+        const val MAX_CALL_REPLY_CHARS = 160
         private const val KEY_SELECTED_MODEL_PREFIX = "selected_model_"
+        private const val KEY_AUTO_CONNECT = "auto_connect"
+        private const val KEY_DEVICE_NICKNAME = "device_nickname"
+        private const val KEY_PROFILE_PREFIX = "gatt_profile_"
+        private const val KEY_COMPANION_ASKED_PREFIX = "companion_asked_"
+        private const val KEY_OBSERVED_COMPANION = "observed_companion"
+
+        private fun companionAskedKey(address: String) = "$KEY_COMPANION_ASKED_PREFIX$address"
+
+        /** The Apache's `V` frame carries at most 16 characters. */
+        const val MAX_NICKNAME_CHARS = 16
 
         private fun modelKey(address: String) = "$KEY_SELECTED_MODEL_PREFIX$address"
+        private fun profileKey(address: String) = "$KEY_PROFILE_PREFIX$address"
+
+        /** Auto-connect's effective value: an explicit choice, else on. */
+        fun resolveAutoConnect(stored: Boolean?): Boolean = stored ?: true
 
         @Volatile
         private var instance: RidePrefs? = null

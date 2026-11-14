@@ -23,7 +23,7 @@ import org.junit.Test
 
 class FuelLevelTest {
 
-    private val max = Telemetry.FUEL_BAR_MAX
+    private val max = Telemetry.NTORQ_FUEL_BAR_MAX
 
     /** Mirrors Session.kt: low nibble, then kept only if the gauge can show it. */
     private fun bars(rawByte: Int): Int? =

@@ -74,6 +74,16 @@ data class ScanState(
     val devices: List<Discovered> = emptyList(),
     /** Set when the scan could not start at all — usually a missing permission. */
     val error: String? = null,
+
+    /**
+     * The scan could not run because the phone's Bluetooth is switched off.
+     *
+     * Kept apart from [error] so the screen can offer the fix (the system
+     * "Turn on Bluetooth?" dialog) instead of only describing the problem. With
+     * Bluetooth off the app used to fail silently, or — on Android 13+, where
+     * `startScan` throws `IllegalStateException` — blame a missing permission.
+     */
+    val bluetoothOff: Boolean = false,
 )
 
 class ScooterScanner(private val context: Context) {
@@ -125,7 +135,7 @@ class ScooterScanner(private val context: Context) {
 
         val name = result.scanRecord?.deviceName
             ?: result.device?.name
-        val byName = name != null && CLUSTER_NAME_RE.containsMatchIn(name)
+        val byName = looksLikeCluster(name)
         val d = Discovered(
             address = addr,
             name = name,
@@ -168,14 +178,21 @@ class ScooterScanner(private val context: Context) {
         timeoutMillis: Long = DEFAULT_TIMEOUT_MS,
     ) {
         if (_state.value.scanning) return
+
+        // Checked before asking for the scanner, not inferred from its absence:
+        // on current Android `bluetoothLeScanner` is non-null with the radio off,
+        // and `startScan` then throws, which the catch below used to report as a
+        // missing permission.
+        if (bluetoothManager?.adapter?.isEnabled != true) {
+            reportBluetoothOff()
+            return
+        }
         val scanner: BluetoothLeScanner? = runCatching {
             bluetoothManager?.adapter?.bluetoothLeScanner
         }.getOrNull()
 
         if (scanner == null) {
-            _state.value = _state.value.copy(
-                error = "Bluetooth is off. Turn it on and scan again.",
-            )
+            reportBluetoothOff()
             return
         }
 
@@ -185,6 +202,7 @@ class ScooterScanner(private val context: Context) {
             onlySmartXonnect = onlySmartXonnect,
             devices = emptyList(),
             error = null,
+            bluetoothOff = false,
         )
 
         val filters = if (onlySmartXonnect) {
@@ -202,12 +220,18 @@ class ScooterScanner(private val context: Context) {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        val ok = runCatching { scanner.startScan(filters, settings, callback) }
+        val failure = runCatching { scanner.startScan(filters, settings, callback) }
             .onFailure {
                 Log.e(TAG, "startScan refused: ${it.message}")
-            }.isSuccess
+            }.exceptionOrNull()
 
-        if (!ok) {
+        if (failure is IllegalStateException) {
+            // "BT Adapter is not turned ON": the radio went off between the
+            // check above and the call.
+            reportBluetoothOff()
+            return
+        }
+        if (failure != null) {
             _state.value = _state.value.copy(
                 scanning = false,
                 error = "Could not start scanning. Grant Bluetooth permission in " +
@@ -257,6 +281,15 @@ class ScooterScanner(private val context: Context) {
         publish()
     }
 
+    private fun reportBluetoothOff() {
+        Log.w(TAG, "scan not started: Bluetooth is off")
+        _state.value = _state.value.copy(
+            scanning = false,
+            bluetoothOff = true,
+            error = "Bluetooth is off. Turn it on to find your vehicle.",
+        )
+    }
+
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     companion object {
@@ -274,7 +307,19 @@ class ScooterScanner(private val context: Context) {
          * differs this simply never fires; it cannot hide a device, only ever
          * add a possibly-false one.
          */
-        private val CLUSTER_NAME_RE = Regex("""\bTVS\s*BT""", RegexOption.IGNORE_CASE)
+        val CLUSTER_NAME_RE = Regex("""\bTVS\s*(?:BT|\d{6,})""", RegexOption.IGNORE_CASE)
+
+        /**
+         * Whether an advertised name looks like a TVS cluster.
+         *
+         * Two shapes are known: `TVS BT…` (SmartXonnect, e.g. the Ntorq) and
+         * `TVS` followed by a long digit string (the Apache RTR 160 4V's module
+         * advertises as `TVS2509…`; seen in nRF Connect, 2026-11-14). The digit
+         * run is required to be long so a name that merely starts with "TVS" —
+         * a TV, say — is not flagged.
+         */
+        fun looksLikeCluster(name: String?): Boolean =
+            name != null && CLUSTER_NAME_RE.containsMatchIn(name)
 
         // Values from android.bluetooth.le.ScanCallback, inlined so the
         // mapping stays next to the message it produces.

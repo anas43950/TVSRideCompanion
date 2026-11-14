@@ -69,6 +69,8 @@ fun ScanScreen(
     lastModelId: String?,
     onPick: (address: String, model: VehicleModel) -> Unit,
     onBack: () -> Unit,
+    /** Show the system "Turn on Bluetooth?" dialog, then scan once it is on. */
+    onRequestBluetooth: () -> Unit,
 ) {
     val state by scanner.state.collectAsStateWithLifecycle()
     val bond by pairing.state.collectAsStateWithLifecycle()
@@ -116,7 +118,7 @@ fun ScanScreen(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
             Column(Modifier.weight(1f)) {
-                Text("Find your scooter", style = MaterialTheme.typography.titleLarge)
+                Text("Find your vehicle", style = MaterialTheme.typography.titleLarge)
                 Text(
                     if (state.scanning) "Scanning — turn the ignition on"
                     else "Scan stopped",
@@ -190,22 +192,31 @@ fun ScanScreen(
             // any successful-but-empty run. Without a button here the only way
             // to scan again is to back out and re-enter, which reads as a bug.
             state.devices.isEmpty() -> CentredNote(
-                text = if (state.error != null) {
-                    "The scan could not run."
-                } else {
-                    "Nothing found.\n\nScan again with the ignition on. If it " +
-                        "still shows nothing, switch off \"Only SmartXonnect " +
-                        "clusters\"."
+                text = when {
+                    state.bluetoothOff ->
+                        "Bluetooth is off.\n\nTurn it on to look for your vehicle."
+                    state.error != null -> "The scan could not run."
+                    else ->
+                        "Nothing found.\n\nScan again with the ignition on. If it " +
+                            "still shows nothing, switch off \"Only SmartXonnect " +
+                            "clusters\"."
                 },
                 action = {
-                    Button(onClick = { scanner.start(onlySmartXonnect) }) {
+                    // With the radio off, "Scan again" would only fail the same
+                    // way; offer the fix instead.
+                    Button(
+                        onClick = {
+                            if (state.bluetoothOff) onRequestBluetooth()
+                            else scanner.start(onlySmartXonnect)
+                        },
+                    ) {
                         Icon(
                             Icons.Filled.Bluetooth,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Scan again")
+                        Text(if (state.bluetoothOff) "Turn on Bluetooth" else "Scan again")
                     }
                 },
             )
@@ -266,7 +277,7 @@ private fun PairModeCard(steps: List<String>, bond: BondState) {
     ) {
         Column(Modifier.padding(14.dp)) {
             Text(
-                "First time? Put the scooter in pair mode",
+                "First time? Put the vehicle in pair mode",
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
@@ -399,7 +410,7 @@ private fun DeviceRow(
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Pair with this scooter (first time only)")
+                        Text("Pair with this vehicle (first time only)")
                     }
                     Spacer(Modifier.height(10.dp))
                 }

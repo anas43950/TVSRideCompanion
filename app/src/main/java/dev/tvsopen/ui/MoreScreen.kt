@@ -1,6 +1,11 @@
 package dev.tvsopen.ui
 
 import android.content.Context
+import dev.tvsopen.transport.CallReply
+import androidx.core.content.ContextCompat
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -17,7 +22,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -46,15 +50,14 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import dev.tvsopen.Nucleus
 import dev.tvsopen.data.DataExport
 import dev.tvsopen.prefs.RidePrefs
+import dev.tvsopen.protocol.ApacheN112Driver
 import dev.tvsopen.protocol.Confidence
 import dev.tvsopen.protocol.Pictograms
-import dev.tvsopen.session.Ride
 import dev.tvsopen.transport.label
 import dev.tvsopen.ui.theme.ThemeMode
 import dev.tvsopen.ui.theme.ThemePrefs
 import java.text.SimpleDateFormat
 import java.util.Date
-import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -68,13 +71,16 @@ import kotlinx.coroutines.launch
 @Composable
 fun MoreScreen(
     connection: dev.tvsopen.session.ConnectionState1,
+    hud: dev.tvsopen.session.HudState,
     riderName: String?,
-    rides: List<Ride>,
-    totalRides: Int,
-    totalRideDistanceKm: Double,
     onRiderNameChange: (String?) -> Unit,
+    deviceNickname: String?,
+    onDeviceNicknameChange: (String?) -> Unit,
+    /** Turning auto-connect on may need a one-time system dialog, so the activity handles it. */
+    onAutoConnectChange: (Boolean) -> Unit,
+    navMirroring: Boolean,
+    onNavMirrorChange: (Boolean) -> Unit,
     notificationAccessGranted: Boolean,
-    onOpenNotificationAccess: () -> Unit,
     onScan: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
@@ -89,7 +95,26 @@ fun MoreScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
-        item { DozeCard() }
+        item {
+            DozeCard(
+                onAutoConnectChange = onAutoConnectChange,
+            )
+        }
+
+        item {
+            Text("NAVIGATION", style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        item {
+            NavigationCard(
+                enabled = navMirroring,
+                hud = hud,
+                notificationAccessGranted = notificationAccessGranted,
+                onChange = onNavMirrorChange,
+            )
+        }
 
         item {
             Text("APPEARANCE", style = MaterialTheme.typography.labelMedium,
@@ -102,16 +127,9 @@ fun MoreScreen(
         item { RiderNameCard(name = riderName, onNameChange = onRiderNameChange) }
 
         item {
-            Text("RIDES", style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        item {
-            RidesCard(
-                rides = rides,
-                totalRides = totalRides,
-                totalDistanceKm = totalRideDistanceKm,
+            DeviceNicknameCard(
+                nickname = deviceNickname,
+                onNicknameChange = onDeviceNicknameChange,
             )
         }
 
@@ -126,7 +144,7 @@ fun MoreScreen(
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Export rides, settings and the last parked spot as JSON. " +
+                        "Export rides and settings as JSON. " +
                             "Everything stays on your device unless you share it.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -168,34 +186,6 @@ fun MoreScreen(
                         }
                         OutlinedButton(onClick = onDisconnect, modifier = Modifier.weight(1f)) {
                             Text("Disconnect")
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            Text("PERMISSIONS", style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        if (notificationAccessGranted)
-                            "Notification access: granted"
-                        else
-                            "Notification access: required to read navigation, calls and messages",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    if (!notificationAccessGranted) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedButton(onClick = onOpenNotificationAccess) {
-                            Icon(Icons.Filled.NotificationsActive, null, Modifier.size(18.dp))
-                            Spacer(Modifier.size(6.dp))
-                            Text("Open notification access")
                         }
                     }
                 }
@@ -245,7 +235,7 @@ fun MoreScreen(
                         Column(Modifier.weight(1f).padding(end = 12.dp)) {
                             Text("Messages", style = MaterialTheme.typography.bodyLarge)
                             Text(
-                                "Show sender and app (WhatsApp, Telegram, SMS, etc.). Message text is never sent.",
+                                "Show the sender (WhatsApp, Telegram, SMS, etc.) and the unread-SMS marker. Message text is never sent.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -262,6 +252,8 @@ fun MoreScreen(
             }
         }
 
+        item { CallReplyCard() }
+
         item {
             Text("PROTOCOL TRANSPARENCY", style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
@@ -277,7 +269,7 @@ fun MoreScreen(
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "What is verified, and what still needs your scooter",
+                        "What is verified, and what still needs your vehicle",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -363,7 +355,7 @@ fun MoreScreen(
                     Text(
                         "Compression, arrows and scrolling run on the phone and are " +
                             "unit-tested. Whether the Ntorq renders both lines at once " +
-                            "still needs your scooter.",
+                            "still needs your vehicle.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -430,6 +422,90 @@ private fun RiderNameCard(name: String?, onNameChange: (String?) -> Unit) {
     }
 }
 
+/**
+ * Turn-by-turn on the cluster from whatever maps app is navigating.
+ *
+ * Start navigation in Google Maps (or any maps app) as usual: the app reads the
+ * next turn, distance and street from the navigation notification and sends
+ * them to the cluster. Needs notification access, granted once in Settings.
+ */
+@Composable
+private fun NavigationCard(
+    enabled: Boolean,
+    hud: dev.tvsopen.session.HudState,
+    notificationAccessGranted: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Show navigation on the cluster", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        when {
+                            !enabled -> "Off — turns are not sent"
+                            !notificationAccessGranted -> "Needs notification access (see Overview)"
+                            hud.active -> "Live from ${hud.provider ?: "your maps app"}"
+                            else -> "On — start navigation in Google Maps"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                AppSwitch(checked = enabled, onCheckedChange = onChange)
+            }
+        }
+    }
+}
+
+/**
+ * Device nickname: the name the cluster shows for this phone.
+ *
+ * The Apache RTR 160 4V shows it as "Connected to <name>" (its `V` frame).
+ * Defaults to "APACHE" when none is saved.
+ */
+@Composable
+private fun DeviceNicknameCard(nickname: String?, onNicknameChange: (String?) -> Unit) {
+    val max = RidePrefs.MAX_NICKNAME_CHARS
+    var editing by remember(nickname) { mutableStateOf(nickname.orEmpty()) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Device nickname", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "The name the cluster shows for this phone, as \"Connected to …\" (Apache RTR 160 4V). " +
+                    "Saving sends it at once when connected, otherwise on the next connection.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = editing,
+                onValueChange = { if (it.length <= max) editing = it },
+                label = { Text("Nickname") },
+                placeholder = { Text(ApacheN112Driver.DEFAULT_NICKNAME) },
+                singleLine = true,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth(),
+                supportingText = { Text("${editing.length}/$max") },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    val trimmed = editing.trim().takeIf { it.isNotEmpty() }
+                    onNicknameChange(trimmed)
+                    editing = trimmed.orEmpty()
+                }) { Text("Save") }
+                OutlinedButton(onClick = {
+                    editing = ""
+                    onNicknameChange(null)
+                }) { Text("Reset") }
+            }
+            Text(
+                if (nickname.isNullOrBlank()) "Using the default: ${ApacheN112Driver.DEFAULT_NICKNAME}"
+                else "Saved: $nickname",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
 
 /**
  * Doze exemption.
@@ -444,7 +520,9 @@ private fun RiderNameCard(name: String?, onNameChange: (String?) -> Unit) {
  * out, rather than pretending a button can do it.
  */
 @Composable
-private fun DozeCard() {
+private fun DozeCard(
+    onAutoConnectChange: (Boolean) -> Unit,
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var exempt by remember { mutableStateOf(isDozeExempt(ctx)) }
@@ -498,67 +576,19 @@ private fun DozeCard() {
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 AppSwitch(
-                    checked = prefs.resumeOnBoot,
-                    onCheckedChange = { prefs.updateResumeOnBoot(it) },
+                    checked = prefs.autoConnect,
+                    onCheckedChange = { onAutoConnectChange(it) },
                 )
                 Spacer(Modifier.size(12.dp))
-                Text(
-                    "Reconnect automatically after a reboot",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun RidesCard(rides: List<Ride>, totalRides: Int, totalDistanceKm: Double) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(
-                "$totalRides rides · ${String.format(Locale.US, "%.1f", totalDistanceKm)} km total",
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Text(
-                "Recorded on this phone from the cluster's odometer. No account, no cloud.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (rides.isEmpty()) {
-                Text(
-                    "No rides yet. Connect to the scooter and ride.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            } else {
-                HorizontalDivider(Modifier.padding(vertical = 4.dp))
-                rides.take(5).forEach { ride ->
-                    val df = SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault())
-                    val whenText = df.format(Date(ride.startedAt))
-                    val dist = String.format(Locale.US, "%.1f km", ride.distanceKm)
-                    val dur = if (ride.inProgress) {
-                        "In progress · ${ride.durationMinutes()} min"
-                    } else {
-                        "${ride.durationMinutes()} min"
-                    }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                whenText,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(
-                                dur,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Text(dist, style = MaterialTheme.typography.bodyMedium)
-                    }
+                Column {
+                    Text("Auto-connect", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Connect to your saved vehicle by itself when it is switched on, " +
+                            "after a reboot, and when Bluetooth comes back. Works best with " +
+                            "battery optimisation exempt (above).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -596,6 +626,88 @@ private fun AppearanceCard() {
                     label = { Text(mode.label, textAlign = TextAlign.Center) },
                     modifier = Modifier.weight(1f),
                 )
+            }
+        }
+    }
+}
+
+/**
+ * The Apache's handlebar end-call button: a ringing call is rejected and,
+ * when on, the caller (contacts only) gets this text. See CallReply.
+ */
+@Composable
+private fun CallReplyCard() {
+    val ctx = LocalContext.current
+    val prefs = remember { RidePrefs.load(ctx) }
+    var enabled by remember { mutableStateOf(prefs.callReplyEnabled) }
+    var saved by remember { mutableStateOf(prefs.callReplyText) }
+    var editing by remember { mutableStateOf(prefs.callReplyText ?: RidePrefs.DEFAULT_CALL_REPLY) }
+    fun missingPermissions() = CallReply.PERMISSIONS.filter {
+        ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
+    }
+    var missing by remember { mutableStateOf(missingPermissions()) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        missing = missingPermissions()
+    }
+    val max = RidePrefs.MAX_CALL_REPLY_CHARS
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("Reply when I reject a call", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Press the handlebar call button twice (Apache RTR 160 4V) to end the call; " +
+                            "one press only hides it on the dashboard. " +
+                            "When this is on, a caller in your contacts also gets this text by SMS. " +
+                            "Normal SMS charges apply.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                AppSwitch(
+                    checked = enabled,
+                    onCheckedChange = {
+                        enabled = it
+                        prefs.callReplyEnabled = it
+                    },
+                )
+            }
+            OutlinedTextField(
+                value = editing,
+                onValueChange = { if (it.length <= max) editing = it },
+                label = { Text("Reply text") },
+                enabled = enabled,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth(),
+                supportingText = { Text("${editing.length}/$max") },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(enabled = enabled, onClick = {
+                    val trimmed = editing.trim()
+                    // Saving the default text stores nothing, so it follows the default.
+                    prefs.callReplyText = trimmed.takeIf { it.isNotEmpty() && it != RidePrefs.DEFAULT_CALL_REPLY }
+                    saved = prefs.callReplyText
+                    editing = saved ?: RidePrefs.DEFAULT_CALL_REPLY
+                }) { Text("Save") }
+                OutlinedButton(enabled = enabled, onClick = {
+                    prefs.callReplyText = null
+                    saved = null
+                    editing = RidePrefs.DEFAULT_CALL_REPLY
+                }) { Text("Reset") }
+            }
+            Text(
+                if (saved == null) "Using the default text" else "Saved",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (missing.isNotEmpty()) {
+                Text(
+                    "Needs permission to end calls, send SMS and read the caller from the call log and contacts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                OutlinedButton(onClick = { launcher.launch(missing.toTypedArray()) }) {
+                    Text("Grant permissions")
+                }
             }
         }
     }

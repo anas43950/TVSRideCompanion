@@ -125,6 +125,19 @@ private const val EXTRA_NAVIGATION_MODE = "navigation.mode"
 object NavParsing {
 
     /**
+     * Whether a notification is turn-by-turn navigation: an ongoing one from a
+     * known maps app, nothing else.
+     *
+     * There used to be a structural fallback for unlisted apps (any ongoing
+     * notification with a title, a text and something distance-shaped). The
+     * phone's own "Charging (36 m until full)" passed it — "36 m" read as 36
+     * metres — so the Overview strip showed the charging status and the
+     * cluster flashed "go straight" every time it updated.
+     */
+    fun isNavigation(pkg: String, ongoing: Boolean, mapsPackages: Set<String>): Boolean =
+        ongoing && pkg in mapsPackages
+
+    /**
      * `150 m`, `1.5 km`, `850m`, `2,3 km` — providers vary on punctuation.
      *
      * The unit alternatives are **longest first, and that is load-bearing**.

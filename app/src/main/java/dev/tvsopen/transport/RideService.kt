@@ -9,24 +9,24 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.location.Location
-import android.location.LocationManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import dev.tvsopen.session.ParkedInfo
-import java.util.Locale
 import dev.tvsopen.R
 import dev.tvsopen.log.Log
 import dev.tvsopen.nav.NavInstruction
 import dev.tvsopen.nav.NavigationBridge
 import dev.tvsopen.prefs.RidePrefs
+import dev.tvsopen.protocol.ApacheN112Driver
 import dev.tvsopen.protocol.Command
 import dev.tvsopen.protocol.DashState
 import dev.tvsopen.protocol.DriverRegistry
+import dev.tvsopen.protocol.GattProfile
 import dev.tvsopen.protocol.NtorqDriver
+import dev.tvsopen.protocol.OpeningContext
 import dev.tvsopen.protocol.OutboundId
 import dev.tvsopen.protocol.PacketBuilder
+import dev.tvsopen.protocol.PhoneStatus
 import dev.tvsopen.protocol.ProtocolDriver
 import dev.tvsopen.protocol.VehicleModel
 import dev.tvsopen.session.ClusterAlert
@@ -38,6 +38,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -64,6 +65,8 @@ class RideService : android.app.Service() {
     /** Replays cluster media keys and call-switch presses on the phone. */
     private var mediaKeys: MediaKeys? = null
     private var callButtons: CallButtons? = null
+    /** The Apache's handlebar end-call button and its reply SMS. */
+    private var callReply: CallReply? = null
     /**
      * Last call-switch value seen on 0x10 byte 12.
      *
@@ -82,6 +85,8 @@ class RideService : android.app.Service() {
      */
     private var reconnectJob: Job? = null
     private var reconnectAttempt = 0
+    /** Stops the service if a background wait outlasts [HANDOFF_AFTER_MS]; see [scheduleHandoff]. */
+    private var handoffJob: Job? = null
     /** Set by [teardown] so a deliberate disconnect does not trigger a retry. */
     private var tearingDown = false
     /**
@@ -95,8 +100,6 @@ class RideService : android.app.Service() {
      */
     private var linkWakeLock: android.os.PowerManager.WakeLock? = null
 
-    /** True after a CONNECTED state, so a disconnect records where the scooter was left. */
-    private var hadLiveLink = false
 
     private fun holdWakeLock() {
         if (linkWakeLock?.isHeld == true) return
@@ -120,6 +123,10 @@ class RideService : android.app.Service() {
         // Logs go to the app's own files so a crash can still be diagnosed.
         Log.enableFileSink(java.io.File(filesDir, "logs"))
         Log.i(TAG, "service created (sdk ${android.os.Build.VERSION.SDK_INT})")
+        // Rides must record when auto-connect starts the service with no
+        // screen ever opened in this process; MainActivity's call alone left
+        // the ride log null then. Idempotent.
+        Session.attachRideLog(applicationContext)
 
         // A `connectedDevice` foreground service needs BLUETOOTH_CONNECT or
         // BLUETOOTH_SCAN to be *granted*, not merely declared. Starting it
@@ -144,6 +151,49 @@ class RideService : android.app.Service() {
             stopSelf()
             return
         }
+        ContextCompat.registerReceiver(
+            this,
+            bluetoothStateReceiver,
+            android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        bluetoothReceiverRegistered = true
+    }
+
+    private var bluetoothReceiverRegistered = false
+
+    /**
+     * Re-arm auto-connect when the phone's Bluetooth comes back on.
+     *
+     * Turning Bluetooth off drops the link, and the background connect issued
+     * after the drop cannot start while the radio is off. Without this the app
+     * stayed disconnected until it was reopened.
+     */
+    private val bluetoothStateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1)) {
+                android.bluetooth.BluetoothAdapter.STATE_ON -> onBluetoothOn()
+                android.bluetooth.BluetoothAdapter.STATE_OFF -> Log.i(TAG, "Bluetooth turned off")
+            }
+        }
+    }
+
+    private fun onBluetoothOn() {
+        val prefs = RidePrefs.load(this)
+        val address = lastAddress ?: prefs.lastAddress ?: return
+        if (!prefs.autoConnect || tearingDown) return
+        if (ble?.state?.value == ConnectionState.CONNECTED) return
+        val model = lastAddress?.let { lastModel }
+            ?: prefs.lastModelId?.let { runCatching { VehicleModel.valueOf(it) }.getOrNull() }
+            ?: VehicleModel.NTORQ
+        Log.i(TAG, "Bluetooth is back on; waiting for $address")
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(AUTO_RECONNECT_DELAY_MS)
+            if (ble?.state?.value == ConnectionState.CONNECTED) return@launch
+            connect(address, model, background = true)
+        }
     }
 
     /** Called once the activity has the runtime BLE permissions. */
@@ -162,14 +212,13 @@ class RideService : android.app.Service() {
                     val model = intent.getStringExtra(EXTRA_MODEL)
                         ?.let { runCatching { VehicleModel.valueOf(it) }.getOrNull() }
                         ?: VehicleModel.NTORQ
-                    connect(address, model)
+                    connect(address, model, intent.getBooleanExtra(EXTRA_BACKGROUND, false))
                 }
             }
-            ACTION_FIND_MY -> bridge?.setFindMyScooter(true)
-            ACTION_STOP_FIND_MY -> bridge?.setFindMyScooter(false)
             ACTION_START_NAV -> bridge?.startNavigation()
             ACTION_STOP_NAV -> bridge?.stopNavigation()
             ACTION_UPDATE_RIDER_NAME -> sendRiderNameIfConnected()
+            ACTION_UPDATE_DEVICE_NAME -> sendDeviceNameIfConnected()
             ACTION_DISCONNECT -> {
                 teardown()
                 stopSelf()
@@ -199,17 +248,19 @@ class RideService : android.app.Service() {
             Log.i(TAG, "sticky restart with no remembered cluster; idling")
             return
         }
-        if (!prefs.resumeOnBoot && ble?.let { it.state.value == ConnectionState.CONNECTED } != true) {
-            // Only resume automatically when the user opted in; otherwise stay
-            // idle rather than silently reattaching to their scooter.
-            Log.i(TAG, "sticky restart; not resuming (resume-on-boot is off)")
+        if (!prefs.autoConnect && ble?.let { it.state.value == ConnectionState.CONNECTED } != true) {
+            // Only resume automatically when auto-connect is on; otherwise stay
+            // idle rather than silently reattaching to the vehicle.
+            Log.i(TAG, "sticky restart; not resuming (auto-connect is off)")
             return
         }
         val model = prefs.lastModelId
             ?.let { runCatching { VehicleModel.valueOf(it) }.getOrNull() }
             ?: VehicleModel.NTORQ
         Log.i(TAG, "sticky restart; resuming $address")
-        connect(address, model)
+        // Background: the vehicle may well be off, and a direct connect would
+        // give up after ~30 s.
+        connect(address, model, background = true)
     }
 
     /**
@@ -220,7 +271,11 @@ class RideService : android.app.Service() {
      * silence, because `transport.connect` itself only returns a Boolean and a
      * SecurityException from `connectGatt` would otherwise kill the service.
      */
-    fun connect(address: String, model: VehicleModel): Boolean {
+    fun connect(address: String, requested: VehicleModel, background: Boolean = false): Boolean {
+        if (shouldReuseLink(lastAddress, address, ble?.state?.value)) {
+            Log.i(TAG, "connect: already ${ble?.state?.value?.label?.lowercase()} to $address; keeping the link")
+            return true
+        }
         // Stop the previous link first: same scope, so a second connect without
         // this leaves both keepalive loops running and the cluster gets double
         // pings.
@@ -228,7 +283,8 @@ class RideService : android.app.Service() {
         linkJob = null
         reconnectJob?.cancel()
         reconnectJob = null
-        reconnectAttempt = 0
+        handoffJob?.cancel()
+        handoffJob = null
         tearingDown = false
         bridge?.stopKeepalive()
         bridge?.stopNavigation()
@@ -237,33 +293,44 @@ class RideService : android.app.Service() {
         // granted, so the foreground notification can go up properly.
         enterForeground()
         val transport = ble ?: ScooterBleService(applicationContext).also { ble = it }
-        // Driven by `sharesNtorqProtocol()`, not by listing models here. This
-        // used to special-case `VehicleModel.NTORQ` and defer everything else to
-        // the registry, which is a second list that has to agree with the one
-        // `Nucleus` registers from — and it silently did not when the Ntorq 125
-        // Race was added, because a miss here means the generic profile and a
-        // dashboard full of `—` rather than an error. One source of truth.
-        val driver = if (model.sharesNtorqProtocol()) {
-            NtorqDriver()
-        } else {
-            DriverRegistry.forModel(model)
+        if (transport.isOpen) {
+            // A pending background connect (or a link being replaced) still
+            // holds the GATT client, and `transport.connect` refuses while it
+            // does. Close it first, then come back.
+            scope.launch {
+                runCatching { transport.disconnect() }
+                connect(address, requested, background)
+            }
+            return true
         }
+        val prefs = RidePrefs.load(this)
+        val knownProfile = prefs.detectedProfile(address)
+        val driver = driverFor(requested, knownProfile)
+        // The Apache driver may stand in for a model the rider never picked
+        // (a fresh scan defaults to Ntorq); show the vehicle it actually is.
+        val model = if (driver is ApacheN112Driver) driver.model else requested
         val b = NavigationBridge(transport, scope, driver)
         bridge = b
         this.driver = driver
         mediaKeys = mediaKeys ?: MediaKeys(applicationContext)
         callButtons = callButtons ?: CallButtons(applicationContext)
+        callReply = callReply ?: CallReply(applicationContext)
         lastCallSwitch = 0
         lastModel = model
         lastAddress = address
-        RidePrefs.load(this).updateLastConnection(address, model.name)
+        prefs.updateLastConnection(address, model.name)
 
-        Session.onConnection(ConnectionState.CONNECTING, model, address)
-        Log.i(TAG, "connecting to ${model.displayName} at $address")
-        notify("Connecting to ${model.displayName}…")
+        val waiting = if (background) ConnectionState.RECONNECTING else ConnectionState.CONNECTING
+        Session.onConnection(waiting, model, address)
+        Log.i(
+            TAG,
+            "${if (background) "waiting for" else "connecting to"} ${model.displayName} at $address " +
+                "(driver ${driver::class.simpleName}, profile ${knownProfile ?: "not yet detected"})",
+        )
+        notify(if (background) "Waiting for ${model.displayName}…" else "Connecting to ${model.displayName}…")
 
         val started = try {
-            transport.connect(address)
+            transport.connect(address, background)
         } catch (e: SecurityException) {
             Log.e(TAG, "connect refused (permission?): ${e.message}")
             false
@@ -285,6 +352,7 @@ class RideService : android.app.Service() {
             Session.onConnection(ConnectionState.DISCONNECTED, model, address)
             return false
         }
+        if (background) scheduleHandoff(address)
 
         linkJob = scope.launch {
             // The link owns a wake lock while connected; without it the
@@ -328,6 +396,7 @@ class RideService : android.app.Service() {
                         Log.i(TAG, "answering cluster challenge")
                         transport.write(response)
                     } else {
+                        if (driver is ApacheN112Driver) logUnusualN112(frame.bytes)
                         val decoded = driver.decode(frame.bytes)
                         if (decoded != null) {
                             Session.onFrame(decoded)
@@ -346,8 +415,16 @@ class RideService : android.app.Service() {
                     Log.d(TAG, "state -> $st")
                     when (st) {
                         ConnectionState.CONNECTED -> {
+                            val detected = transport.profile.value
+                            if (needsDriverSwitch(knownProfile, detected)) {
+                                switchDriver(address, model, detected!!)
+                                return@collect
+                            }
+                            if (detected != null && detected.id != knownProfile) {
+                                prefs.updateDetectedProfile(address, detected.id)
+                            }
+                            handoffJob?.cancel()
                             reconnectAttempt = 0
-                            hadLiveLink = true
                             notify("Connected to ${model.displayName}")
                             holdWakeLock()
                             // Auto-start here, not only from the activity's
@@ -360,6 +437,10 @@ class RideService : android.app.Service() {
                             if (RidePrefs.load(this@RideService).navigationMirroring) {
                                 b.startNavigation()
                             }
+                            // Clusters with an opening sequence get the greeting
+                            // and the keepalive from it instead, once
+                            // notifications are on (the collector below).
+                            if (driver.hasOpeningSequence) return@collect
                             // Greeting first, like the official sendInitialData:
                             // the cluster shows it on ignition, and a name saved
                             // while disconnected goes out on the next connect.
@@ -376,7 +457,6 @@ class RideService : android.app.Service() {
                         }
                         ConnectionState.DISCONNECTED -> {
                             releaseWakeLock()
-                            recordParkedIfPossible()
                             notify("Disconnected")
                             scheduleReconnect(address, model)
                         }
@@ -384,20 +464,44 @@ class RideService : android.app.Service() {
                     }
                 }
             }
+            // …one for clusters that wait to be spoken to (the Apache N112):
+            // opening frames once notifications are on, then the keepalive and
+            // the periodic phone-status frame. `collectLatest`, so a drop (which
+            // clears `subscribed`) stops the loop and a reconnect restarts it.
+            if (driver.hasOpeningSequence) launch {
+                transport.subscribed.collectLatest { on ->
+                    if (!on) return@collectLatest
+                    if (needsDriverSwitch(knownProfile, transport.profile.value)) return@collectLatest
+                    val opening = driver.openingSequence(openingContext())
+                    Log.i(TAG, "sending opening sequence (${opening.size} frames)")
+                    for (frame in opening) {
+                        transport.write(frame)
+                        delay(OPENING_GAP_MS)
+                    }
+                    if (driver.capabilities.keepalive) {
+                        b.startKeepalive { DashState(timeMillis = System.currentTimeMillis()) }
+                    }
+                    while (true) {
+                        delay(PHONE_STATUS_EVERY_MS)
+                        val status = driver.buildPhoneStatus(phoneStatus()) ?: break
+                        transport.write(status)
+                    }
+                }
+            }
             launch {
                 var lastAlert: ClusterAlert? = null
-                Session.alert.collect { alert ->
-                    val t = ble ?: return@collect
-                    if (t.state.value != ConnectionState.CONNECTED) {
-                        lastAlert = alert
-                        return@collect
-                    }
+                // collectLatest: a new alert (or the call ending) cancels a
+                // caller repeat still running for the previous one.
+                Session.alert.collectLatest { alert ->
+                    val previous = lastAlert
+                    lastAlert = alert
+                    val t = ble ?: return@collectLatest
+                    if (t.state.value != ConnectionState.CONNECTED) return@collectLatest
                     if (alert != null) {
                         sendAlert(driver, t, alert)
-                    } else if (lastAlert?.kind == ClusterAlert.Kind.CALL) {
+                    } else if (previous?.kind == ClusterAlert.Kind.CALL) {
                         sendCallEnded(driver, t)
                     }
-                    lastAlert = alert
                 }
             }
             launch {
@@ -407,6 +511,136 @@ class RideService : android.app.Service() {
             }
         }
         return true
+    }
+
+    /**
+     * Pick the driver for a link.
+     *
+     * The detected Bluetooth layout decides the protocol: a vehicle offering
+     * the Apache `5500` service speaks N112 whatever model was picked, because
+     * no other driver can talk to that service. Otherwise the model decides, as
+     * before — `sharesNtorqProtocol()` rather than a list of models here, so
+     * this cannot drift from the set `Nucleus` registers.
+     */
+    private fun driverFor(model: VehicleModel, profileId: String?): ProtocolDriver = when {
+        profileId == GattProfile.APACHE_N112.id ->
+            ApacheN112Driver(if (model.isApache()) model else VehicleModel.APACHE_160)
+        model.sharesNtorqProtocol() -> NtorqDriver()
+        else -> DriverRegistry.forModel(model)
+    }
+
+    /**
+     * Whether the link was opened with the wrong protocol for what the vehicle
+     * turned out to offer. Only the N112 / not-N112 split matters: every other
+     * profile is handled by the model-based choice in [driverFor].
+     */
+    private fun needsDriverSwitch(knownProfile: String?, detected: GattProfile?): Boolean {
+        if (detected == null) return false
+        val wasN112 = knownProfile == GattProfile.APACHE_N112.id
+        val isN112 = detected == GattProfile.APACHE_N112
+        return wasN112 != isN112
+    }
+
+    /**
+     * Remember what the vehicle offered and reconnect with the matching driver.
+     *
+     * Happens once per vehicle: the profile is saved, so the next connection
+     * starts with the right driver. Costs one extra connect (a couple of
+     * seconds) on first contact with an Apache.
+     */
+    private fun switchDriver(address: String, model: VehicleModel, detected: GattProfile) {
+        val prefs = RidePrefs.load(this)
+        prefs.updateDetectedProfile(address, detected.id)
+        val next = if (detected == GattProfile.APACHE_N112 && !model.isApache()) {
+            VehicleModel.APACHE_160
+        } else {
+            model
+        }
+        if (next != model) prefs.updateSelectedModel(address, next.name)
+        Log.i(TAG, "$address offers ${detected.id}; reconnecting with the ${next.displayName} driver")
+        val transport = ble ?: return
+        scope.launch {
+            linkJob?.cancel()
+            linkJob = null
+            runCatching { transport.disconnect() }
+            connect(address, next)
+        }
+    }
+
+    /** Clock, names and phone status for a driver's opening frames. */
+    private fun openingContext(): OpeningContext {
+        val prefs = RidePrefs.load(this)
+        val now = java.util.Calendar.getInstance()
+        return OpeningContext(
+            hourOfDay = now.get(java.util.Calendar.HOUR_OF_DAY),
+            minute = now.get(java.util.Calendar.MINUTE),
+            riderName = prefs.riderName,
+            deviceNickname = prefs.deviceNickname,
+            phoneStatus = phoneStatus(),
+        )
+    }
+
+    /**
+     * Real phone values for the cluster's status icons, in the official scales.
+     *
+     * Each source degrades to 0 on its own rather than failing the frame:
+     * network type needs READ_PHONE_STATE and missed calls READ_CALL_LOG (both
+     * optional caller-ID permissions). Unread messages are always 0 — reading
+     * them needs SMS access, which this app does not request.
+     */
+    private fun phoneStatus(): PhoneStatus {
+        val percent = getSystemService(android.os.BatteryManager::class.java)
+            ?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+        val tm = getSystemService(android.telephony.TelephonyManager::class.java)
+        val signal = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching { tm?.signalStrength?.level }.getOrNull() ?: 0
+        } else {
+            0
+        }
+        val networkType = if (granted(Manifest.permission.READ_PHONE_STATE)) {
+            runCatching { tm?.dataNetworkType }.getOrNull() ?: 0
+        } else {
+            0
+        }
+        return PhoneStatus(
+            signalLevel = signal,
+            batteryLevel = ApacheN112Driver.batteryLevel(percent),
+            missedCalls = if (granted(Manifest.permission.READ_CALL_LOG)) newMissedCalls() else 0,
+            // The cluster's SMS marker; follows the message-mirroring toggle.
+            unreadMessages = if (RidePrefs.load(this).mirrorMessages) Session.unreadSms.value else 0,
+            networkType = ApacheN112Driver.networkClass(networkType),
+        )
+    }
+
+    private fun granted(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    /** Missed calls not yet seen in the phone app, as the cluster's badge. */
+    @SuppressLint("MissingPermission")
+    private fun newMissedCalls(): Int = runCatching {
+        contentResolver.query(
+            android.provider.CallLog.Calls.CONTENT_URI,
+            arrayOf(android.provider.CallLog.Calls._ID),
+            "${android.provider.CallLog.Calls.TYPE} = ? AND ${android.provider.CallLog.Calls.NEW} = 1",
+            arrayOf(android.provider.CallLog.Calls.MISSED_TYPE.toString()),
+            null,
+        )?.use { it.count } ?: 0
+    }.getOrDefault(0)
+
+    /** Re-send the device nickname to clusters that show one. */
+    private fun sendDeviceNameIfConnected() {
+        val transport = ble ?: return
+        if (driver !is ApacheN112Driver) return
+        if (transport.state.value != ConnectionState.CONNECTED) {
+            Log.i(TAG, "device nickname saved; will send on next connection")
+            return
+        }
+        val nickname = RidePrefs.load(this).deviceNickname ?: ApacheN112Driver.DEFAULT_NICKNAME
+        scope.launch {
+            if (transport.write(ApacheN112Driver.deviceName(nickname))) {
+                Log.i(TAG, "device nickname sent (${nickname.length} chars)")
+            }
+        }
     }
 
     /** Coarse phone battery as 0-5 bars, for the cluster ping packet. */
@@ -451,7 +685,11 @@ class RideService : android.app.Service() {
                 val number = alert.subtitle.substringAfterLast('·').trim().ifBlank { alert.subtitle }
                 val name = alert.title.takeIf { it.isNotBlank() && it != number }
                 val frames = driver.buildCallerFrames(number, null, name)
-                if (frames.isNotEmpty()) {
+                val repeatMs = driver.callerRepeatMs
+                if (frames.isNotEmpty() && repeatMs != null) {
+                    Log.i(TAG, "cluster call alert: '$name' (repeating every $repeatMs ms while ringing)")
+                    repeatCallerWhileRinging(transport, frames, repeatMs)
+                } else if (frames.isNotEmpty()) {
                     Log.i(TAG, "cluster call alert: '$name' '$number' (${frames.size} frames)")
                     frames.forEach { transport.write(it) }
                 } else {
@@ -469,6 +707,48 @@ class RideService : android.app.Service() {
         }
     }
 
+    /**
+     * Full, unthrottled log lines for the N112 frames worth seeing whole: any
+     * with a `Y` (handlebar call button) record, and any the parser could not
+     * read to the end. The frame dump is paced to one per data id per second,
+     * so a rare record could otherwise go unseen.
+     */
+    private fun logUnusualN112(raw: ByteArray) {
+        val hex = raw.joinToString(" ") { "%02X".format(it) }
+        if (ApacheN112Driver.parseRecords(raw).any { it.tag == 'Y' }) {
+            Log.i(TAG, "N112 Y record: $hex")
+        }
+        val left = ApacheN112Driver.unparsedBytes(raw)
+        if (left > 0) Log.i(TAG, "N112 frame not fully parsed ($left bytes left): $hex")
+    }
+
+    /**
+     * Resend the caller until the phone stops ringing (answered, rejected or
+     * ended). The alert clearing also stops it, via collectLatest. Capped, so
+     * a ringing state that never reads back cannot hold the screen forever.
+     */
+    private suspend fun repeatCallerWhileRinging(
+        transport: ScooterBleService,
+        frames: List<ByteArray>,
+        repeatMs: Long,
+    ) {
+        val until = System.currentTimeMillis() + CALLER_REPEAT_MAX_MS
+        var sends = 0
+        while (System.currentTimeMillis() < until && phoneRinging() != false) {
+            frames.forEach { transport.write(it) }
+            sends++
+            delay(repeatMs)
+        }
+        Log.i(TAG, "caller repeat stopped after $sends sends (ringing=${phoneRinging()})")
+    }
+
+    /** Whether the phone is ringing; null when it cannot be read (no READ_PHONE_STATE). */
+    @Suppress("DEPRECATION")
+    private fun phoneRinging(): Boolean? = runCatching {
+        getSystemService(android.telephony.TelephonyManager::class.java)?.callState ==
+            android.telephony.TelephonyManager.CALL_STATE_RINGING
+    }.getOrNull()
+
     private suspend fun sendCallEnded(driver: ProtocolDriver, transport: ScooterBleService) {
         // Best-effort clear: send an idle/ended caller frame where the driver
         // supports it. The cluster typically times the display out on its own.
@@ -477,47 +757,6 @@ class RideService : android.app.Service() {
             Log.i(TAG, "cluster call alert cleared")
             transport.write(frame)
         }
-    }
-
-    private fun recordParkedIfPossible() {
-        if (!hadLiveLink) return
-        hadLiveLink = false
-        val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
-        val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!fine && !coarse) {
-            Log.i(TAG, "parked spot not recorded: no location permission")
-            return
-        }
-        val lm = getSystemService(LocationManager::class.java) ?: return
-        val loc = bestLastLocation(lm) ?: run {
-            Log.i(TAG, "parked spot not recorded: no recent location fix")
-            return
-        }
-        val label = String.format(Locale.US, "%.5f, %.5f", loc.latitude, loc.longitude)
-        val info = ParkedInfo(System.currentTimeMillis(), label, null)
-        RidePrefs.load(this).saveParked(info.atMillis, info.label)
-        Session.onParked(info)
-        Log.i(TAG, "parked spot saved: $label")
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun bestLastLocation(lm: LocationManager): Location? {
-        val providers = listOf(
-            LocationManager.GPS_PROVIDER,
-            LocationManager.NETWORK_PROVIDER,
-            LocationManager.PASSIVE_PROVIDER,
-        )
-        var best: Location? = null
-        for (provider in providers) {
-            val loc = runCatching {
-                val enabled = provider == LocationManager.PASSIVE_PROVIDER || lm.isProviderEnabled(provider)
-                if (enabled) lm.getLastKnownLocation(provider) else null
-            }.getOrNull() ?: continue
-            if (best == null || loc.time > best!!.time) best = loc
-        }
-        return best
     }
 
     /**
@@ -530,6 +769,11 @@ class RideService : android.app.Service() {
      * id alone.
      */
     private fun handleClusterButton(driver: ProtocolDriver, frame: dev.tvsopen.protocol.DecodedFrame) {
+        if (frame.dataId == ApacheN112Driver.RECORDS_DATA_ID) {
+            // Apache N112: the `Y` record is the handlebar call button.
+            frame.field(dev.tvsopen.protocol.Field.CALL_DISCONNECT)?.let { callReply?.onButton(it.toInt(), scope) }
+            return
+        }
         if (frame.dataId == 0x6B && driver.capabilities.musicKeys) {
             val cmd = frame.field(dev.tvsopen.protocol.Field.MUSIC_COMMAND)?.toInt() ?: return
             mediaKeys?.handle(cmd)
@@ -558,6 +802,25 @@ class RideService : android.app.Service() {
     private fun scheduleReconnect(address: String, model: VehicleModel) {
         if (tearingDown) return
         if (reconnectJob?.isActive == true) return
+        if (ble?.unsupportedDevice == true) {
+            // It offered no service this app can drive; retrying only repeats that.
+            Log.w(TAG, "not reconnecting: $address offers no supported service")
+            return
+        }
+        if (RidePrefs.load(this).autoConnect) {
+            // Auto-connect: no backoff and no giving up. A background connect
+            // request costs almost nothing while it waits — the phone's
+            // Bluetooth controller does the waiting — and links the moment the
+            // vehicle advertises again, e.g. after the ignition is switched back
+            // on. The short delay lets the old GATT client finish closing.
+            Log.i(TAG, "link dropped; waiting for $address in the background")
+            reconnectJob = scope.launch {
+                delay(AUTO_RECONNECT_DELAY_MS)
+                if (ble?.state?.value == ConnectionState.CONNECTED) return@launch
+                connect(address, model, background = true)
+            }
+            return
+        }
         if (reconnectAttempt >= RECONNECT_DELAYS_MS.size) {
             Log.w(TAG, "giving up after ${RECONNECT_DELAYS_MS.size} reconnect attempts")
             return
@@ -573,11 +836,42 @@ class RideService : android.app.Service() {
         }
     }
 
+    /**
+     * Hand waiting over to Android after a while, when it can do the waiting.
+     *
+     * A background connect needs this service running, which means a
+     * notification on screen for as long as the vehicle is off — possibly all
+     * night. When Companion Device Manager is watching for the vehicle there is
+     * no need: after [HANDOFF_AFTER_MS] without it coming back, the service
+     * stops, and [VehiclePresenceService] starts it again when the vehicle
+     * reappears. The grace period covers a brief drop mid-ride, during which
+     * the vehicle may never look "gone" to Android and so would not "reappear".
+     */
+    private fun scheduleHandoff(address: String) {
+        handoffJob?.cancel()
+        handoffJob = null
+        val observed = RidePrefs.load(this).observedCompanion
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !address.equals(observed, ignoreCase = true)) {
+            return
+        }
+        handoffJob = scope.launch {
+            delay(HANDOFF_AFTER_MS)
+            if (ble?.state?.value == ConnectionState.CONNECTED) return@launch
+            Log.i(TAG, "vehicle not back; stopping until Android reports it in range")
+            withContext(Dispatchers.Main) {
+                teardown()
+                stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
     private fun teardown() {
         tearingDown = true
         reconnectJob?.cancel()
         reconnectJob = null
-        recordParkedIfPossible()
+        handoffJob?.cancel()
+        handoffJob = null
         linkJob?.cancel()
         linkJob = null
         bridge?.stopKeepalive()
@@ -601,6 +895,10 @@ class RideService : android.app.Service() {
     }
 
     override fun onDestroy() {
+        if (bluetoothReceiverRegistered) {
+            runCatching { unregisterReceiver(bluetoothStateReceiver) }
+            bluetoothReceiverRegistered = false
+        }
         teardown()
         scope.cancel()
         super.onDestroy()
@@ -656,19 +954,36 @@ class RideService : android.app.Service() {
     }
 
     companion object {
+        /** Longest a ringing call keeps the caller screen refreshed. */
+        private const val CALLER_REPEAT_MAX_MS = 90_000L
+
         private const val TAG = "RideService"
         const val CHANNEL = "ride"
         const val NOTIF_ID = 1
         const val ACTION_CONNECT = "dev.tvsopen.CONNECT"
-        const val ACTION_FIND_MY = "dev.tvsopen.FIND_MY"
-        const val ACTION_STOP_FIND_MY = "dev.tvsopen.STOP_FIND_MY"
         const val ACTION_START_NAV = "dev.tvsopen.START_NAV"
         const val ACTION_STOP_NAV = "dev.tvsopen.STOP_NAV"
         const val ACTION_UPDATE_RIDER_NAME = "dev.tvsopen.UPDATE_RIDER_NAME"
+        const val ACTION_UPDATE_DEVICE_NAME = "dev.tvsopen.UPDATE_DEVICE_NAME"
+
+        /** Gap between opening frames; the official app waits 100 ms after each. */
+        private const val OPENING_GAP_MS = 100L
+
+        /** Phone-status re-send interval; ~3 s in the HCI capture of the official app. */
+        private const val PHONE_STATUS_EVERY_MS = 3_000L
         const val ACTION_DISCONNECT = "dev.tvsopen.DISCONNECT"
 
         const val EXTRA_ADDRESS = "address"
         const val EXTRA_MODEL = "model"
+
+        /** True: wait for the vehicle with a background connect instead of a 30 s direct one. */
+        const val EXTRA_BACKGROUND = "background"
+
+        /** Pause before re-arming a background connect after a drop. */
+        private const val AUTO_RECONNECT_DELAY_MS = 2_000L
+
+        /** How long to wait in the background before leaving it to Android; see [scheduleHandoff]. */
+        private const val HANDOFF_AFTER_MS = 120_000L
 
         /**
          * Official reconnect backoff, seconds: 5, 10, 20, 40, then 60 for the

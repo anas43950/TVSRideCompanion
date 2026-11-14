@@ -127,7 +127,7 @@ fun LogScreen(modifier: Modifier = Modifier) {
             ) {
                 Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null)
                 Text(
-                    "No records yet. Connect to a scooter, or check the filter level.",
+                    "No records yet. Connect to a vehicle, or check the filter level.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }

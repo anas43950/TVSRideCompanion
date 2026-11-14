@@ -17,7 +17,9 @@
 
 package dev.tvsopen.transport
 
+import dev.tvsopen.prefs.RidePrefs
 import dev.tvsopen.protocol.DriverRegistry
+import dev.tvsopen.protocol.GattProfile
 import dev.tvsopen.protocol.NtorqDriver
 import dev.tvsopen.protocol.VehicleModel
 import org.junit.Assert.assertEquals
@@ -89,5 +91,45 @@ class FirstLaunchDefaultsTest {
             generic.capabilities.navigationHud,
         )
         assertFalse(generic.capabilities.textMessages)
+    }
+
+    // ---- auto-connect ----
+
+    @Test
+    fun `auto-connect is on for a fresh install`() {
+        assertTrue(RidePrefs.resolveAutoConnect(stored = null))
+    }
+
+    @Test
+    fun `an explicit auto-connect choice always wins`() {
+        assertFalse(RidePrefs.resolveAutoConnect(stored = false))
+        assertTrue(RidePrefs.resolveAutoConnect(stored = true))
+    }
+
+    // ---- scanner names ----
+
+    @Test
+    fun `both known cluster name shapes are recognised`() {
+        // SmartXonnect (Ntorq) and the Apache N112 module. Invented serials.
+        assertTrue(ScooterScanner.looksLikeCluster("TVS BT 1234"))
+        assertTrue(ScooterScanner.looksLikeCluster("TVSBT0001"))
+        assertTrue(ScooterScanner.looksLikeCluster("TVS1234567890"))
+    }
+
+    @Test
+    fun `unrelated names are not flagged as clusters`() {
+        assertFalse(ScooterScanner.looksLikeCluster(null))
+        assertFalse(ScooterScanner.looksLikeCluster("TVS Living Room"))
+        assertFalse(ScooterScanner.looksLikeCluster("TVS12"))
+        assertFalse(ScooterScanner.looksLikeCluster("Galaxy Buds"))
+    }
+
+    @Test
+    fun `the Apache profile is distinct from SmartXonnect and both are tried`() {
+        val apache = GattProfile.APACHE_N112
+        val sx = GattProfile.SMARTXONNECT
+        assertNotEquals(sx.serviceUuid, apache.serviceUuid)
+        assertTrue(apache.requiredNotifyUuid in apache.notifyUuids)
+        assertEquals(listOf(sx, apache), GattProfile.ALL)
     }
 }

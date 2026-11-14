@@ -22,7 +22,7 @@ import android.os.Looper
 import android.os.ParcelUuid
 import dev.tvsopen.log.Log
 import dev.tvsopen.protocol.Gatt
-import dev.tvsopen.protocol.GattConfig
+import dev.tvsopen.protocol.GattProfile
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -85,6 +85,36 @@ class ScooterBleService(private val context: Context) {
     private val _lastFrameAt = MutableStateFlow(0L)
     val lastFrameAt: StateFlow<Long> = _lastFrameAt.asStateFlow()
 
+    /**
+     * The Bluetooth layout this link matched, or null until discovery finds one.
+     *
+     * This is how an Apache (`5500` service) is told apart from a SmartXonnect
+     * cluster: by what the vehicle offers, not by its advertised name.
+     */
+    private val _profile = MutableStateFlow<GattProfile?>(null)
+    val profile: StateFlow<GattProfile?> = _profile.asStateFlow()
+
+    /**
+     * True once every notification subscription (CCCD write) on this link has
+     * been answered.
+     *
+     * The Apache sends nothing until notifications are switched on *and* the
+     * phone has spoken, and it forgets the subscription between connections.
+     * Its opening frames therefore wait for this, not for [state].
+     */
+    private val _subscribed = MutableStateFlow(false)
+    val subscribed: StateFlow<Boolean> = _subscribed.asStateFlow()
+
+    /**
+     * Set when a link came up but offered no service this app can drive.
+     *
+     * Retrying such a device only repeats the failure, so the ride service reads
+     * this before scheduling a reconnect. Cleared on the next [connect].
+     */
+    @Volatile
+    var unsupportedDevice: Boolean = false
+        private set
+
     private val writeLock = Mutex()
     // Written on the binder thread by the GATT callback and read on a coroutine
     // by connect/write, so the visibility guarantee is not optional: without it
@@ -116,27 +146,57 @@ class ScooterBleService(private val context: Context) {
 
     fun isBluetoothEnabled(): Boolean = adapter?.isEnabled == true
 
+    /**
+     * Whether a GATT client is held: a live link, one being set up, or a
+     * background connect request still waiting for the vehicle. [connect]
+     * refuses while this is true, so a caller replacing the link must
+     * [disconnect] first.
+     */
+    val isOpen: Boolean get() = gatt != null
+
     fun isSupported(): Boolean =
         context.packageManager.hasSystemFeature("android.hardware.bluetooth_le")
 
     // ---- lifecycle ----
 
+    /**
+     * Open a link to [address].
+     *
+     * [background] chooses between the two Android connect modes:
+     *
+     *  - `false` — a direct connect. Fast, but Android gives up after about 30 s
+     *    if the vehicle is not there. Used right after the rider picks a vehicle
+     *    from the scan list, when it is known to be advertising.
+     *  - `true` — a background connect request (`autoConnect = true`). The
+     *    phone's Bluetooth controller waits for the vehicle with no time limit
+     *    and almost no battery cost, and links the moment it advertises. This is
+     *    what auto-connect is built on; the official app connects this way too
+     *    (seen in its logcat, 2026-11-14).
+     */
     @SuppressLint("MissingPermission")
-    fun connect(address: String, config: GattConfig = GattConfig.DEFAULT): Boolean {
+    fun connect(address: String, background: Boolean = false): Boolean {
         if (gatt != null) return false
         val a = adapter ?: return false
+        if (!a.isEnabled) {
+            Log.w(TAG, "connect skipped: Bluetooth is off")
+            return false
+        }
         val device: BluetoothDevice = try {
             a.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
             Log.w(TAG, "bad address $address: ${e.message}")
             return false
         }
-        _state.value = ConnectionState.CONNECTING
+        unsupportedDevice = false
+        _profile.value = null
+        _subscribed.value = false
+        _state.value = if (background) ConnectionState.RECONNECTING else ConnectionState.CONNECTING
+        Log.i(TAG, if (background) "waiting for $address (background connect)" else "connecting to $address")
 
         gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            device.connectGatt(context, config.autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            device.connectGatt(context, background, gattCallback, BluetoothDevice.TRANSPORT_LE)
         } else {
-            device.connectGatt(context, config.autoConnect, gattCallback)
+            device.connectGatt(context, background, gattCallback)
         }
         return true
     }
@@ -174,6 +234,8 @@ class ScooterBleService(private val context: Context) {
         if (gatt === g) {
             gatt = null
             discoveryStarted = false
+            _profile.value = null
+            _subscribed.value = false
         }
         runCatching { g.close() }
             .onFailure { Log.w(TAG, "gatt close: ${it.message}") }
@@ -267,8 +329,12 @@ class ScooterBleService(private val context: Context) {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "GATT connected (status=$status)")
-                    _state.value = ConnectionState.CONNECTED
+                    // Still CONNECTING, deliberately. The radio link is up, but
+                    // nothing can be sent until discovery finds a service this
+                    // app speaks. Reporting "Connected" here showed a green
+                    // "Connected" for the Apache while every write was dropped.
+                    Log.i(TAG, "GATT link up (status=$status); discovering services")
+                    _state.value = ConnectionState.CONNECTING
                     try {
                         // Discovery must NOT be issued while the MTU exchange is
                         // in flight: the stack answers it with BUSY and
@@ -303,28 +369,48 @@ class ScooterBleService(private val context: Context) {
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            val svc = resolveVerifiedService(g)
-            if (svc == null) {
-                Log.w(TAG, "no verified SmartXonnect service on ${g.device.address}")
+            if (g !== gatt) return
+            val match = GattProfile.ALL.firstNotNullOfOrNull { profile ->
+                resolveVerifiedService(g, profile)?.let { profile to it }
+            }
+            if (match == null) {
+                // Say what *was* there. Without this list, an Apache that offers
+                // only its own `5500` service produced a bare "not found" and
+                // took a separate nRF Connect session to diagnose.
+                val offered = g.services.orEmpty().joinToString { it.uuid.toString() }
+                Log.e(
+                    TAG,
+                    "no supported service on ${g.device.address} (status=$status); " +
+                        "it offers: [$offered]. Disconnecting.",
+                )
+                unsupportedDevice = true
+                runCatching { g.disconnect() }
                 return
             }
-            val ch = svc.getCharacteristic(UUID.fromString(Gatt.WRITE))
+            val (profile, svc) = match
+            val ch = svc.getCharacteristic(UUID.fromString(profile.writeUuid))
             if (ch == null) {
                 // Unreachable after resolveVerifiedService, but the compiler
                 // needs the check and an explicit refusal beats a crash.
-                Log.w(TAG, "write characteristic ${Gatt.WRITE} missing")
+                Log.w(TAG, "write characteristic ${profile.writeUuid} missing")
                 return
             }
             writeChar = ch
+            _profile.value = profile
             Log.i(
                 TAG,
-                "service ready (${svc.uuid}), write char props=0x${ch.properties.toString(16)}",
+                "service ready: ${profile.id} (${svc.uuid}), " +
+                    "write char props=0x${ch.properties.toString(16)}",
             )
+            // Usable from here: the write characteristic exists. Set before the
+            // CCCD writes so a reply to a challenge that arrives the instant
+            // notifications switch on is not dropped as "link not ready".
+            _state.value = ConnectionState.CONNECTED
             // Listen before the CCCD write: the cluster can emit the 0x9A/0xF2
             // challenge the instant the descriptor is written, and anything
             // subscribed after that loses it. setCharacteristicNotification
             // only arms the local callback; the descriptor write follows.
-            enableNotifications(g, svc)
+            enableNotifications(g, svc, profile)
         }
 
         override fun onCharacteristicChanged(
@@ -375,7 +461,15 @@ class ScooterBleService(private val context: Context) {
     private fun writeNextCccd(g: BluetoothGatt) {
         val next = synchronized(cccdLock) {
             if (cccdQueue.isNotEmpty()) cccdQueue.removeFirst() else null
-        } ?: return
+        }
+        if (next == null) {
+            // Queue drained: every subscription has been answered.
+            if (g === gatt && !_subscribed.value) {
+                Log.i(TAG, "notifications enabled")
+                _subscribed.value = true
+            }
+            return
+        }
         // The two writeDescriptor overloads differ in return type: the API-33 one
         // returns an Int status code, the deprecated one a Boolean. An
         // if/else mixing them infers `Comparable & Serializable`, so
@@ -450,10 +544,13 @@ class ScooterBleService(private val context: Context) {
      * answered.
      */
     @SuppressLint("MissingPermission")
-    private fun resolveVerifiedService(g: BluetoothGatt): android.bluetooth.BluetoothGattService? {
-        val serviceUuid = UUID.fromString(Gatt.SERVICE)
-        val writeUuid = UUID.fromString(Gatt.WRITE)
-        val readUuid = UUID.fromString(Gatt.READ)
+    private fun resolveVerifiedService(
+        g: BluetoothGatt,
+        profile: GattProfile,
+    ): android.bluetooth.BluetoothGattService? {
+        val serviceUuid = UUID.fromString(profile.serviceUuid)
+        val writeUuid = UUID.fromString(profile.writeUuid)
+        val readUuid = UUID.fromString(profile.requiredNotifyUuid)
 
         val exact = g.getService(serviceUuid)
         if (exact != null) {
@@ -463,7 +560,7 @@ class ScooterBleService(private val context: Context) {
             Log.e(
                 TAG,
                 "service $serviceUuid present but a characteristic is missing; " +
-                    "refusing the link (hard failure, no fallback)",
+                    "refusing the ${profile.id} profile (hard failure, no fallback)",
             )
             return null
         }
@@ -472,7 +569,8 @@ class ScooterBleService(private val context: Context) {
             it.getCharacteristic(writeUuid) != null && it.getCharacteristic(readUuid) != null
         }
         if (byCharacteristics == null) {
-            Log.e(TAG, "no service exposes both $writeUuid and $readUuid")
+            // Normal for every profile but the one the vehicle uses, so not an error.
+            Log.d(TAG, "${profile.id}: no service exposes both $writeUuid and $readUuid")
         } else {
             Log.w(
                 TAG,
@@ -483,9 +581,16 @@ class ScooterBleService(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private fun enableNotifications(g: BluetoothGatt, svc: android.bluetooth.BluetoothGattService) {
+    private fun enableNotifications(
+        g: BluetoothGatt,
+        svc: android.bluetooth.BluetoothGattService,
+        profile: GattProfile,
+    ) {
         val pending = ArrayList<BluetoothGattDescriptor>()
-        for (uuid in listOf(Gatt.READ, Gatt.DEVICE_INFO)) {
+        // Written on every connection, never skipped as "already on": the
+        // Apache forgets the subscription between links, and a test that relied
+        // on it persisting got silence (nRF Connect, 2026-11-14 11:38).
+        for (uuid in profile.notifyUuids) {
             val ch = svc.getCharacteristic(UUID.fromString(uuid)) ?: continue
             g.setCharacteristicNotification(ch, true)
             val cccd = ch.getDescriptor(CCCD)
@@ -495,7 +600,10 @@ class ScooterBleService(private val context: Context) {
             if (cccd != null && canNotify) pending += cccd
             else Log.d(TAG, "no notifiable CCCD for $uuid")
         }
-        if (pending.isEmpty()) return
+        if (pending.isEmpty()) {
+            _subscribed.value = true
+            return
+        }
         synchronized(cccdLock) {
             cccdQueue.clear()
             cccdQueue.addAll(pending)

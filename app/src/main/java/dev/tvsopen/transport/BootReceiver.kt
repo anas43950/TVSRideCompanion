@@ -28,8 +28,8 @@ class BootReceiver : BroadcastReceiver() {
         ) return
 
         val prefs = RidePrefs.load(context)
-        if (!prefs.resumeOnBoot) {
-            Log.i(TAG, "boot: not resuming, user has not opted in")
+        if (!prefs.autoConnect) {
+            Log.i(TAG, "boot: not resuming, auto-connect is off")
             return
         }
         val address = prefs.lastAddress
@@ -54,7 +54,10 @@ class BootReceiver : BroadcastReceiver() {
                     .putExtra(
                         RideService.EXTRA_MODEL,
                         prefs.lastModelId ?: VehicleModel.NTORQ.name,
-                    ),
+                    )
+                    // Background connect: after a reboot the vehicle is usually
+                    // off, and a direct connect would give up after ~30 s.
+                    .putExtra(RideService.EXTRA_BACKGROUND, true),
             )
         }.onFailure {
             Log.w(TAG, "boot: could not start ride service: ${it.message}")

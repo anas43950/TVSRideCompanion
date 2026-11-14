@@ -119,17 +119,8 @@ class MapsNotificationListener : NotificationListenerService() {
         val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim().orEmpty()
         val ongoing = n.isOngoing
 
-        val parsed = NavParsing.parse(title, text, bigText, subText)
-        val distance = parsed.distanceMeters
-
-        val looksLikeNav = pkg in allowedPackages ||
-            (extras.containsKey("android.app.extra.MAPS_MODE") ||
-                extras.containsKey("navigation.mode") ||
-                (ongoing && title.isNotEmpty() && (text.isNotEmpty() || bigText.isNotEmpty()) &&
-                    distance >= 0))
-
-        if (looksLikeNav) {
-            postNav(pkg, parsed)
+        if (NavParsing.isNavigation(pkg, ongoing, allowedPackages)) {
+            postNav(pkg, NavParsing.parse(title, text, bigText, subText))
             return
         }
 
@@ -148,8 +139,10 @@ class MapsNotificationListener : NotificationListenerService() {
             return
         }
 
-        val hasMessageStyle = extractMessagingStyle(extras) != null
+        val style = extractMessagingStyle(extras)
+        val hasMessageStyle = style != null
         val isMessage = hasMessageStyle || category == Notification.CATEGORY_MESSAGE
+        trackSms(n, isMessage, style?.messages?.size)
         if (isMessage && prefs.mirrorMessages) {
             // Only mirror messaging apps; a random app using MessagingStyle for
             // progress would be noise. Known packages plus any app whose
@@ -215,13 +208,7 @@ class MapsNotificationListener : NotificationListenerService() {
     private fun postMessage(key: String, pkg: String, extras: Bundle, title: String) {
         val info = extractMessageInfo(extras, title)
         val app = appLabel(pkg)
-        val display = when {
-            info.title.isNotBlank() && info.count > 1 -> "${info.title} ($app ${info.count})"
-            info.title.isNotBlank() && app.isNotBlank() -> "${info.title} ($app)"
-            info.title.isNotBlank() -> info.title
-            info.count > 1 -> "$app: ${info.count} msgs"
-            else -> app.ifBlank { "Message" }
-        }
+        val display = SmsUnread.alertText(info.title, app)
         Log.i(TAG, "message from $pkg: '$display'")
         Session.onAlert(
             ClusterAlert(
@@ -271,6 +258,7 @@ class MapsNotificationListener : NotificationListenerService() {
         val key = removed.key
         // Clear a call/message alert posted from this notification.
         Session.clearAlert(key)
+        if (smsCounts.remove(key) != null) publishUnreadSms()
 
         if (removed.packageName !in allowedPackages) return
         pendingClear?.let { handler.removeCallbacks(it) }
@@ -288,6 +276,40 @@ class MapsNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.i(TAG, "listener connected; allowed: ${allowedPackages.joinToString()}")
+        // Unread SMS already in the shade when the app (re)starts still count.
+        smsCounts.clear()
+        runCatching { activeNotifications }.getOrNull()?.forEach { n ->
+            val extras = n.notification?.extras ?: return@forEach
+            val style = extractMessagingStyle(extras)
+            val isMessage = style != null || n.notification?.category == Notification.CATEGORY_MESSAGE
+            trackSms(n, isMessage, style?.messages?.size, publish = false)
+        }
+        publishUnreadSms()
+    }
+
+    /** Messages each SMS notification in the shade stands for, by notification key. */
+    private val smsCounts = mutableMapOf<String, Int>()
+
+    /**
+     * Keep the unread-SMS count for the cluster's marker (the 5th byte of the
+     * N112 `X` frame, confirmed on the bike). A notification that stops being
+     * an SMS message, or goes away, stops counting.
+     */
+    private fun trackSms(n: StatusBarNotification, isMessage: Boolean, styleMessages: Int?, publish: Boolean = true) {
+        val defaultSms = runCatching { android.provider.Telephony.Sms.getDefaultSmsPackage(this) }.getOrNull()
+        val isSummary = ((n.notification?.flags ?: 0) and Notification.FLAG_GROUP_SUMMARY) != 0
+        val changed = if (SmsUnread.isSmsMessage(n.packageName, defaultSms, n.isOngoing, isMessage)) {
+            smsCounts.put(n.key, SmsUnread.messagesIn(isSummary, styleMessages)) != SmsUnread.messagesIn(isSummary, styleMessages)
+        } else {
+            smsCounts.remove(n.key) != null
+        }
+        if (changed && publish) publishUnreadSms()
+    }
+
+    private fun publishUnreadSms() {
+        val total = smsCounts.values.sum()
+        if (Session.unreadSms.value != total) Log.i(TAG, "unread SMS -> $total")
+        Session.setUnreadSms(total)
     }
 
     override fun onListenerDisconnected() {
