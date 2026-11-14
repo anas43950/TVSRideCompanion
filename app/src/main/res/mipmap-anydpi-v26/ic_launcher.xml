@@ -1,14 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Adaptive launcher icon, API 26+.
+  Adaptive launcher icon, API 26+: an orange sport bike, centred on white.
 
-  The mark is an instrument-cluster speedometer: an arc, a needle and a hub.
-  That is literally what this app talks to, and it stays legible at 48px where
-  anything more detailed turns to mush.
-
-  Deliberately not drawn from anything TVS or Jupiter owns. Their marks are
-  excluded on purpose — see research/SOURCES.md — and a gauge is generic enough
-  that nobody can read it as a badge. Palette stays off their racing red.
+  An original drawing. Only the colour scheme follows the official TVS Connect
+  icon; none of TVS's artwork is used (see research/SOURCES.md).
 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@drawable/ic_launcher_background" />

@@ -65,7 +65,7 @@ class RideRulesTest {
 
     @Test
     fun `a parked connection is hidden, uncounted, then dropped`() {
-        var s = ride(empty, t0, 1000.0, 1000.3, t0 + 2 * min)
+        var s = ride(empty, t0, 1000.0, 1000.0, t0 + 2 * min)
         assertEquals(1, s.rides.size)
         assertTrue(RideRules.visible(s.rides).isEmpty())
         assertEquals(Totals(0, 0.0), s.totals)
@@ -76,8 +76,8 @@ class RideRulesTest {
 
     @Test
     fun `a short ride still joins a quick reconnect`() {
-        var s = ride(empty, t0, 1000.0, 1000.3, t0 + 2 * min)
-        s = ride(s, t0 + 5 * min, 1000.3, 1003.0, t0 + 15 * min)
+        var s = ride(empty, t0, 1000.0, 1000.0, t0 + 2 * min)
+        s = ride(s, t0 + 5 * min, 1000.0, 1003.0, t0 + 15 * min)
         assertEquals(3.0, s.rides.single().distanceKm, 1e-9)
         assertEquals(Totals(1, 3.0), s.totals)
     }
@@ -132,5 +132,13 @@ class RideRulesTest {
     @Test
     fun `totals never go negative`() {
         assertEquals(Totals(0, 0.0), Totals(0, 0.0) - Ride(t0, t0 + min, 0.1))
+    }
+
+    @Test
+    fun `one odometer step is a ride`() {
+        // The minimum is 50 m and the odometer moves in 0.1 km steps.
+        val s = ride(empty, t0, 1000.0, 1000.1, t0 + 3 * min)
+        assertEquals(1, RideRules.visible(s.rides).size)
+        assertEquals(1, s.totals.rides)
     }
 }

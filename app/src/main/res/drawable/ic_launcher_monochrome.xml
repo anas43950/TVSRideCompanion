@@ -1,22 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Monochrome layer for themed icons. Same geometry as the foreground with the
-  dial arc dropped, because a themed icon is a flat silhouette and the extra
-  half-tone arc only muddies it. Solid black: the system replaces the colour.
+  Monochrome layer for themed icons (Android 13+): the same bike as a flat
+  silhouette. Solid black: the system replaces the colour.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
-    <path
-        android:pathData="M54,68 L70,42"
-        android:strokeColor="#FF000000"
-        android:strokeWidth="10"
-        android:strokeLineCap="round" />
-
-    <path
-        android:pathData="M54,63 m-5.5,0 a5.5,5.5 0 1,0 11,0 a5.5,5.5 0 1,0 -11,0"
-        android:fillColor="#FF000000" />
+    <!-- Drawn on the full 108 grid (bounds x 14..93.5, y 35..86.5) and
+         scaled by 0.74 about its centre onto the icon centre (54,54). -->
+    <group
+        android:scaleX="0.74"
+        android:scaleY="0.74"
+        android:translateX="14.225"
+        android:translateY="9.045">
+        <!-- Wheels. -->
+        <path android:pathData="M19.5,72 a11.5,11.5 0 1,0 23.0,0 a11.5,11.5 0 1,0 -23.0,0" android:strokeColor="#FF000000" android:strokeWidth="6" />
+        <path android:pathData="M67.5,72 a11.5,11.5 0 1,0 23.0,0 a11.5,11.5 0 1,0 -23.0,0" android:strokeColor="#FF000000" android:strokeWidth="6" />
+        <!-- Swingarm and fork. -->
+        <path android:pathData="M46,62 L31,72" android:strokeColor="#FF000000" android:strokeWidth="5.5" android:strokeLineCap="round" />
+        <path android:pathData="M73,50 L79,72" android:strokeColor="#FF000000" android:strokeWidth="5.5" android:strokeLineCap="round" />
+        <!-- Tail, seat, tank and fairing in one shape. -->
+        <path android:pathData="M14,46 C22,47 30,49 38,50 C42,46 48,43 56,42 L64,42 C67,39 70,36 74,35 L77,35 C81,39 84,44 84,49 L77,53 C73,57 68,61 60,64 L46,64 C42,60 36,56 14,46 Z" android:fillColor="#FF000000" />
+    </group>
 </vector>

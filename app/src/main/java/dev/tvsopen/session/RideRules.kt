@@ -18,8 +18,11 @@ object RideRules {
     /** A reconnect within this long continues the previous ride. */
     const val MERGE_GAP_MS = 5 * 60_000L
 
-    /** Shorter rides (parked connections, moving the bike) are not kept. */
-    const val MIN_RIDE_KM = 0.5
+    /**
+     * 50 m. The odometer moves in 0.1 km steps, so in practice a ride is kept
+     * once the odometer has moved at all; a parked connection stays at 0.
+     */
+    const val MIN_RIDE_KM = 0.05
 
     /** An open ride is saved at most this often, so a killed app loses little. */
     const val SAVE_EVERY_MS = 30_000L
