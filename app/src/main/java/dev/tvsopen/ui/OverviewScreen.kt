@@ -36,7 +36,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.tvsopen.session.ConnectionState1
@@ -505,19 +504,6 @@ private fun FuelGauge(bars: Int?, low: Boolean) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                when {
-                    bars == null -> "No reading yet"
-                    low -> "Low fuel — $filled of ${Telemetry.FUEL_BAR_MAX} bars"
-                    else -> "$filled of ${Telemetry.FUEL_BAR_MAX} bars"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = if (low) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
         }
     }
 }

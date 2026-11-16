@@ -166,16 +166,38 @@ object Session {
     private val _totalRideDistanceKm = MutableStateFlow(0.0)
     val totalRideDistanceKm: StateFlow<Double> = _totalRideDistanceKm.asStateFlow()
 
-    fun attachRideLog(context: android.content.Context) {
+    /** Last fuel level and odometer, stored so a restarted app still shows them. */
+    @Volatile
+    private var lastReadings: LastReadings? = null
+    private var savedReadings = LastReadings.Values()
+
+    /**
+     * Open the on-phone stores: the ride log and the last readings.
+     * Idempotent; called by both the Activity and the ride service.
+     */
+    fun attachStorage(context: android.content.Context) {
         if (rideLog != null) return
         synchronized(this) {
             if (rideLog != null) return
+            val store = LastReadings(context)
+            savedReadings = store.load()
+            _telemetry.value = LastReadings.restore(_telemetry.value, savedReadings)
+            lastReadings = store
+
             val log = RideLog(context)
             rideLog = log
             _rides.value = log.rides.value
             _totalRides.value = log.totalRides
             _totalRideDistanceKm.value = log.totalDistanceKm
         }
+    }
+
+    /** Store fuel and odometer whenever the bike sends a new value. */
+    private fun persistReadings() {
+        val store = lastReadings ?: return
+        val next = LastReadings.update(savedReadings, _telemetry.value) ?: return
+        savedReadings = next
+        store.save(next)
     }
 
     /**
@@ -186,7 +208,10 @@ object Session {
     private fun trackRideDistance() {
         val log = rideLog ?: return
         val t = _telemetry.value
-        log.update(t.odometerKm, t.speedKmh)
+        // Only an odometer from this link: until one arrives, odometerKm may be
+        // the stored or a previous connection's value, and a ride started from
+        // it would count distance ridden while the app was not listening.
+        log.update(t.odometerKm.takeIf { t.odometerAtConnectKm != null }, t.speedKmh)
         _rides.value = log.rides.value
     }
 
@@ -343,6 +368,7 @@ object Session {
 
             else -> cur.copy(lastFrameAt = now)
         }
+        persistReadings()
     }
 
     fun onHud(update: (HudState) -> HudState) {

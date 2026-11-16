@@ -116,11 +116,18 @@ class RideLog(context: Context) {
         }
     }.getOrDefault(emptyList())
 
-    /** Store [s] and publish it. */
-    private fun commit(s: RideRules.State) {
+    /**
+     * Store [s] and publish it.
+     *
+     * The window is trimmed in memory too, not only in what is written, so
+     * the screen never shows a ride that storage has already dropped. The
+     * totals are kept separately and are not reduced by the trim.
+     */
+    private fun commit(full: RideRules.State) {
+        val s = if (full.rides.size > MAX_RIDES) full.copy(rides = full.rides.take(MAX_RIDES)) else full
         state = s
         val arr = JSONArray()
-        s.rides.take(MAX_RIDES).forEach { r ->
+        s.rides.forEach { r ->
             arr.put(
                 JSONObject()
                     .put("s", r.startedAt)
@@ -177,6 +184,7 @@ class RideLog(context: Context) {
         private const val KEY_TOTAL = "ride_total_count"
         private const val KEY_DIST = "ride_total_distance"
 
-        private const val MAX_RIDES = 100
+        /** About a year of rides at a few a day; roughly 100 KB of JSON. */
+        private const val MAX_RIDES = 1000
     }
 }

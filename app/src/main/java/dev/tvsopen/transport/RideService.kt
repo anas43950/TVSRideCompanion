@@ -126,7 +126,7 @@ class RideService : android.app.Service() {
         // Rides must record when auto-connect starts the service with no
         // screen ever opened in this process; MainActivity's call alone left
         // the ride log null then. Idempotent.
-        Session.attachRideLog(applicationContext)
+        Session.attachStorage(applicationContext)
 
         // A `connectedDevice` foreground service needs BLUETOOTH_CONNECT or
         // BLUETOOTH_SCAN to be *granted*, not merely declared. Starting it

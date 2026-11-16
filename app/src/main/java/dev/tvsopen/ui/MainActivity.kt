@@ -413,7 +413,7 @@ class MainActivity : AppCompatActivity() {
         // captured even before the ride service starts.
         Log.enableFileSink(java.io.File(filesDir, "logs"))
         ThemePrefs.load(this)
-        Session.attachRideLog(applicationContext)
+        Session.attachStorage(applicationContext)
         Log.i("App", "activity created; drivers registered; theme=${ThemePrefs.mode}")
 
         setContent {
