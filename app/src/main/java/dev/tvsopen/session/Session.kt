@@ -184,13 +184,21 @@ object Session {
             _telemetry.value = LastReadings.restore(_telemetry.value, savedReadings)
             lastReadings = store
 
-            val log = RideLog(context)
-            rideLog = log
-            _rides.value = log.rides.value
-            _totalRides.value = log.totalRides
-            _totalRideDistanceKm.value = log.totalDistanceKm
+            // Loads in the background; the flows fill in when it reports.
+            rideLog = RideLog(context) { rides, totals ->
+                _rides.value = rides
+                _totalRides.value = totals.rides
+                _totalRideDistanceKm.value = totals.distanceKm
+            }
         }
     }
+
+    /**
+     * Change the stored rides in one step, such as an import. Waits for the
+     * ride log to finish loading. Null when storage is not attached.
+     */
+    suspend fun <T> editRides(block: (RideRules.State) -> Pair<RideRules.State, T>): T? =
+        rideLog?.edit(block)
 
     /** Store fuel and odometer whenever the bike sends a new value. */
     private fun persistReadings() {
@@ -212,13 +220,6 @@ object Session {
         // the stored or a previous connection's value, and a ride started from
         // it would count distance ridden while the app was not listening.
         log.update(t.odometerKm.takeIf { t.odometerAtConnectKm != null }, t.speedKmh)
-        _rides.value = log.rides.value
-    }
-
-    private fun refreshRideTotals(log: RideLog) {
-        _rides.value = log.rides.value
-        _totalRides.value = log.totalRides
-        _totalRideDistanceKm.value = log.totalDistanceKm
     }
 
     fun reset() {
@@ -240,10 +241,10 @@ object Session {
         if (isConnected && !wasConnected) {
             _telemetry.value = _telemetry.value.copy(odometerAtConnectKm = null)
             // Rejoining a counted ride takes it back out of the totals.
-            rideLog?.let { it.start(); refreshRideTotals(it) }
+            rideLog?.start()
         }
         if (!isConnected && wasConnected) {
-            rideLog?.let { it.finish(); refreshRideTotals(it) }
+            rideLog?.finish()
         }
 
         _connection.value = ConnectionState1(state, model, address)

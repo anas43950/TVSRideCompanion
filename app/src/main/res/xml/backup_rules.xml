@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Auto Backup rules for Android 11 and below (fullBackupContent).
+
+  The OS backs this data up to the rider's own Google Drive. It needs no
+  INTERNET permission here: the system backup transport does the upload, not
+  the app, so the "no account, no cloud" property is untouched.
+
+  Allowlist, not denylist. Only two things are backed up:
+    - database "." — the ride history (databases/rides.db).
+    - sharedpref "." — every setting (tvsride, last_readings, theme).
+
+  Left out on purpose:
+    - the frame log (files/logs/) — it records street names and the cluster
+      MAC verbatim, and is debug data, not something worth restoring. An
+      allowlist keeps it, and anything added under files/ later, off Drive.
+    - the export folder lives in the cache, which Auto Backup never touches.
+-->
+<full-backup-content>
+    <include domain="database" path="." />
+    <include domain="sharedpref" path="." />
+</full-backup-content>

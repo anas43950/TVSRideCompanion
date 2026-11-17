@@ -74,6 +74,12 @@ fun OverviewScreen(
     modifier: Modifier = Modifier,
 ) {
     val connected = connection.state == ConnectionState.CONNECTED
+    // Disconnected, the moment-to-moment tiles (speed, gear, top speed, RPM,
+    // this-connection distance) blank to "—" instead of lingering on the last
+    // values Session still holds. Fuel and total distance are the exception:
+    // they are the persisted last-known readings (LastReadings), kept visible
+    // with the bike off on purpose, so shownTelemetry carries them through.
+    val shown = shownTelemetry(telemetry, connected)
 
     Column(
         modifier
@@ -102,7 +108,7 @@ fun OverviewScreen(
             BigStat(
                 Modifier.weight(1f),
                 Icons.Filled.Speed,
-                telemetry.speedKmh?.toString() ?: "—",
+                shown.speedKmh?.toString() ?: "—",
                 "km/h",
                 "Speed",
                 LocalTilePalette.current.largeLeft,
@@ -110,7 +116,7 @@ fun OverviewScreen(
             BigStat(
                 Modifier.weight(1f),
                 Icons.Filled.Settings,
-                gearLabel(telemetry.gear),
+                gearLabel(shown.gear),
                 "",
                 "Gear",
                 LocalTilePalette.current.largeRight,
@@ -122,7 +128,7 @@ fun OverviewScreen(
             BigStat(
                 Modifier.weight(1f),
                 Icons.Filled.Speed,
-                telemetry.topSpeedKmh?.toString() ?: "—",
+                shown.topSpeedKmh?.toString() ?: "—",
                 "km/h",
                 "Top Speed",
                 LocalTilePalette.current.neutral,
@@ -130,7 +136,7 @@ fun OverviewScreen(
             BigStat(
                 Modifier.weight(1f),
                 Icons.Filled.Bolt,
-                telemetry.engineRpm?.toString() ?: "—",
+                shown.engineRpm?.toString() ?: "—",
                 "rpm",
                 // Current engine speed, not a peak.
                 "Engine RPM",
@@ -140,7 +146,7 @@ fun OverviewScreen(
 
         Spacer(Modifier.height(20.dp))
         SectionLabel("Fuel")
-        FuelGauge(telemetry.fuelBars, telemetry.lowFuel == true)
+        FuelGauge(shown.fuelBars, shown.lowFuel == true)
 
         Spacer(Modifier.height(20.dp))
         SectionLabel("Distance Travelled")
@@ -149,13 +155,13 @@ fun OverviewScreen(
             DistanceStat(
                 Modifier.weight(1f),
                 Icons.Filled.Route,
-                telemetry.odometerKm?.let { String.format("%.1f", it) } ?: "—",
+                shown.odometerKm?.let { String.format("%.1f", it) } ?: "—",
                 "Total distance (km)",
             )
             DistanceStat(
                 Modifier.weight(1f),
                 Icons.Filled.Route,
-                telemetry.connectedDistanceKm()
+                shown.connectedDistanceKm()
                     ?.let { String.format("%.1f", it) } ?: "—",
                 "This connection (km)",
             )
@@ -164,6 +170,30 @@ fun OverviewScreen(
         Spacer(Modifier.height(28.dp))
     }
 }
+
+/**
+ * What the tiles should read from. Moment-to-moment live data belongs to a live
+ * link, so once the bike is not connected this blanks it — speed, gear, top
+ * speed, RPM and the this-connection distance all go null and read as `—`,
+ * instead of lingering on the last values Session still holds after a drop.
+ *
+ * Fuel and total distance (odometer) are kept: they are the persisted
+ * last-known readings [LastReadings] stores precisely so they stay visible with
+ * the bike off, and blanking them would undo that. This carries exactly those
+ * three fields through — the same ones LastReadings persists — and drops the
+ * rest. (odometerAtConnectKm is among the dropped, so "This connection" reads
+ * `—` while disconnected.)
+ */
+internal fun shownTelemetry(telemetry: Telemetry, connected: Boolean): Telemetry =
+    if (connected) {
+        telemetry
+    } else {
+        Telemetry(
+            fuelBars = telemetry.fuelBars,
+            lowFuel = telemetry.lowFuel,
+            odometerKm = telemetry.odometerKm,
+        )
+    }
 
 /** `N` for neutral (0), the gear number otherwise, `—` with no reading. */
 internal fun gearLabel(gear: Int?): String = when (gear) {

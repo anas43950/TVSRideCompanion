@@ -2,12 +2,17 @@
 //
 // The app keeps everything locally (rides, settings, parked spot) and has no
 // account or cloud. Exporting produces a single JSON file the rider can keep or
-// move to another device. Nothing is uploaded anywhere.
+// move to another device, where DataImport reads it back. Nothing is uploaded
+// anywhere; the file only leaves the phone if the rider shares it.
 
 package dev.tvsopen.data
 
 import android.content.Context
+import android.net.Uri
+import androidx.core.content.FileProvider
 import dev.tvsopen.prefs.RidePrefs
+import dev.tvsopen.session.Ride
+import dev.tvsopen.session.RideRules
 import dev.tvsopen.session.Session
 import dev.tvsopen.ui.theme.ThemePrefs
 import org.json.JSONArray
@@ -22,51 +27,93 @@ object DataExport {
     const val FORMAT = "tvsride-export"
     const val VERSION = 1
 
-    /** Build the export document as a JSON string. */
-    fun buildJson(context: Context): String {
-        val prefs = RidePrefs.load(context)
-        val rides = Session.rides.value
+    /** Matches the provider in the manifest and `res/xml/export_paths.xml`. */
+    private const val AUTHORITY = "dev.tvsopen.export"
 
-        val root = JSONObject()
-            .put("format", FORMAT)
-            .put("version", VERSION)
-            .put("exportedAt", System.currentTimeMillis())
+    /** The settings that go into an export. */
+    data class Settings(
+        val riderName: String?,
+        val navigationMirroring: Boolean,
+        val mirrorPhoneCalls: Boolean,
+        val mirrorMessages: Boolean,
+        val theme: String,
+        val callReplyEnabled: Boolean,
+        /** Null means the default reply. */
+        val callReplyText: String?,
+        /** Null means the default name. */
+        val deviceNickname: String?,
+    )
 
+    /** The export document. Pure, so the tests can read what it writes. */
+    fun toJson(
+        rides: List<Ride>,
+        totals: RideRules.Totals,
+        settings: Settings,
+        exportedAt: Long,
+    ): String {
         val ridesArr = JSONArray()
         rides.forEach { r ->
-            val o = JSONObject()
-                .put("startedAt", r.startedAt)
-                .put("distanceKm", r.distanceKm)
-                .put("topSpeedKmh", r.topSpeedKmh ?: JSONObject.NULL)
-            if (r.endedAt != null) o.put("endedAt", r.endedAt) else o.put("endedAt", JSONObject.NULL)
-            ridesArr.put(o)
+            ridesArr.put(
+                JSONObject()
+                    .put("startedAt", r.startedAt)
+                    .put("distanceKm", r.distanceKm)
+                    .put("topSpeedKmh", r.topSpeedKmh ?: JSONObject.NULL)
+                    .put("endedAt", r.endedAt ?: JSONObject.NULL),
+            )
         }
-        root.put("rides", ridesArr)
-            .put("rideTotalCount", Session.totalRides.value)
-            .put("rideTotalDistanceKm", Session.totalRideDistanceKm.value)
+        return JSONObject()
+            .put("format", FORMAT)
+            .put("version", VERSION)
+            .put("exportedAt", exportedAt)
+            .put("rides", ridesArr)
+            .put("rideTotalCount", totals.rides)
+            .put("rideTotalDistanceKm", totals.distanceKm)
+            .put(
+                "prefs",
+                JSONObject()
+                    .put("riderName", settings.riderName ?: JSONObject.NULL)
+                    .put("navigationMirroring", settings.navigationMirroring)
+                    .put("mirrorPhoneCalls", settings.mirrorPhoneCalls)
+                    .put("mirrorMessages", settings.mirrorMessages)
+                    .put("theme", settings.theme)
+                    .put("callReplyEnabled", settings.callReplyEnabled)
+                    .put("callReplyText", settings.callReplyText ?: JSONObject.NULL)
+                    .put("deviceNickname", settings.deviceNickname ?: JSONObject.NULL),
+            )
+            .toString(2)
+    }
 
-        root.put(
-            "prefs",
-            JSONObject()
-                .put("riderName", prefs.riderName ?: JSONObject.NULL)
-                .put("navigationMirroring", prefs.navigationMirroring)
-                .put("mirrorPhoneCalls", prefs.mirrorPhoneCalls)
-                .put("mirrorMessages", prefs.mirrorMessages)
-                .put("theme", ThemePrefs.mode.name),
+    /** Build the export document from what the app holds now. */
+    fun buildJson(context: Context): String {
+        val prefs = RidePrefs.load(context)
+        return toJson(
+            rides = Session.rides.value,
+            totals = RideRules.Totals(Session.totalRides.value, Session.totalRideDistanceKm.value),
+            settings = Settings(
+                riderName = prefs.riderName,
+                navigationMirroring = prefs.navigationMirroring,
+                mirrorPhoneCalls = prefs.mirrorPhoneCalls,
+                mirrorMessages = prefs.mirrorMessages,
+                theme = ThemePrefs.mode.name,
+                callReplyEnabled = prefs.callReplyEnabled,
+                callReplyText = prefs.callReplyText,
+                deviceNickname = prefs.deviceNickname,
+            ),
+            exportedAt = System.currentTimeMillis(),
         )
-
-        return root.toString(2)
     }
 
     /**
-     * Write the export to a file in the app's cache and return it, ready to
-     * share. The caller owns presenting the share/send intent.
+     * Write the export to a file in the app's cache, replacing earlier
+     * exports so they do not pile up, and return a `content://` link other
+     * apps can read once the share intent grants it. Call off the main thread.
      */
-    fun writeFile(context: Context): File {
+    fun writeFile(context: Context): Uri {
         val dir = File(context.cacheDir, "export").apply { mkdirs() }
+        dir.listFiles()?.forEach { it.delete() }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val file = File(dir, "tvsride-export-$stamp.json")
         file.writeText(buildJson(context))
-        return file
+        return FileProvider.getUriForFile(context, AUTHORITY, file)
     }
 }

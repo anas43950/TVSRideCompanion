@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Auto Backup rules for Android 12 and above (dataExtractionRules).
+
+  Same scope as backup_rules.xml, spelled for both transports:
+    - cloud-backup   — the rider's own Google Drive. No INTERNET permission is
+                       needed; the system backup transport does the upload.
+    - device-transfer — a direct copy to the rider's next phone.
+
+  Allowlist, not denylist. Only the ride history (databases/rides.db) and the
+  settings (tvsride, last_readings, theme shared prefs) move. The frame log
+  (files/logs/) is left out of both: verbatim street names and the cluster MAC,
+  and debug data besides. The export folder is in the cache, never backed up.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+    </device-transfer>
+</data-extraction-rules>

@@ -22,10 +22,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.Science
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -36,6 +34,8 @@ import dev.tvsopen.ui.theme.AppSwitch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,12 +47,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
-import dev.tvsopen.Nucleus
 import dev.tvsopen.data.DataExport
+import dev.tvsopen.data.DataImport
+import dev.tvsopen.log.Log
+import dev.tvsopen.session.Session
+import android.content.ClipData
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import dev.tvsopen.prefs.RidePrefs
 import dev.tvsopen.protocol.ApacheN112Driver
-import dev.tvsopen.protocol.Confidence
-import dev.tvsopen.protocol.Pictograms
 import dev.tvsopen.transport.label
 import dev.tvsopen.ui.theme.ThemeMode
 import dev.tvsopen.ui.theme.ThemePrefs
@@ -63,10 +66,6 @@ import kotlinx.coroutines.launch
 
 /**
  * More / settings screen.
- *
- * The transparency panel is the important part: it states exactly which
- * protocol facts are verified and which still await hardware confirmation, so
- * a user reading this app knows what they can trust.
  */
 @Composable
 fun MoreScreen(
@@ -84,6 +83,14 @@ fun MoreScreen(
     onScan: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
+    val ctx = LocalContext.current
+    // Bumped when an import restores settings, so the cards that copy a
+    // setting into their own editing state read it again.
+    var settingsVersion by remember { mutableIntStateOf(0) }
+    // Read from prefs, which an import may have changed since the caller read them.
+    val rider = remember(settingsVersion, riderName) { RidePrefs.load(ctx).riderName }
+    val nickname = remember(settingsVersion, deviceNickname) { RidePrefs.load(ctx).deviceNickname }
+
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(16.dp),
@@ -160,9 +167,9 @@ fun MoreScreen(
 
         item {
             NamesCard(
-                riderName = riderName,
+                riderName = rider,
                 onRiderNameChange = onRiderNameChange,
-                nickname = deviceNickname,
+                nickname = nickname,
                 onNicknameChange = onDeviceNicknameChange,
             )
         }
@@ -173,184 +180,8 @@ fun MoreScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
-        item {
-            val ctx = LocalContext.current
-            val prefs = remember { RidePrefs.load(ctx) }
-            var mirrorCalls by remember { mutableStateOf(prefs.mirrorPhoneCalls) }
-            var mirrorMessages by remember { mutableStateOf(prefs.mirrorMessages) }
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text("Phone & app calls", style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                "Show incoming calls (phone, WhatsApp, Telegram, etc.) on the cluster.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        AppSwitch(
-                            checked = mirrorCalls,
-                            onCheckedChange = {
-                                mirrorCalls = it
-                                prefs.mirrorPhoneCalls = it
-                            },
-                        )
-                    }
-                    HorizontalDivider()
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text("Messages", style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                "Show the sender (WhatsApp, Telegram, SMS, etc.) and the unread-SMS marker. Message text is never sent.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        AppSwitch(
-                            checked = mirrorMessages,
-                            onCheckedChange = {
-                                mirrorMessages = it
-                                prefs.mirrorMessages = it
-                            },
-                        )
-                    }
-                }
-            }
-        }
-
-        item { CallReplyCard() }
-
-        item {
-            Text("PROTOCOL TRANSPARENCY", style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        item {
-            Card(
-                Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                ),
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "What is verified, and what still needs your vehicle",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Nucleus.describe().forEachIndexed { index, (model, facts) ->
-                        if (index > 0) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 8.dp),
-                                color = MaterialTheme.colorScheme.outline,
-                            )
-                        }
-                        Text(
-                            model.displayName,
-                            style = MaterialTheme.typography.labelLarge,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
-                        facts.forEach { (fact, confidence) ->
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    when (confidence) {
-                                        Confidence.VERIFIED_FROM_APK -> "●"
-                                        Confidence.INHERITED_UNVERIFIED -> "◐"
-                                        Confidence.NEEDS_CAPTURE -> "○"
-                                    },
-                                    color = when (confidence) {
-                                        Confidence.VERIFIED_FROM_APK -> MaterialTheme.colorScheme.primary
-                                        Confidence.INHERITED_UNVERIFIED -> MaterialTheme.colorScheme.tertiary
-                                        Confidence.NEEDS_CAPTURE -> MaterialTheme.colorScheme.outline
-                                    },
-                                    modifier = Modifier.padding(end = 8.dp),
-                                )
-                                Text(fact, style = MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "● verified from the official APK   " +
-                            "◐ inherited, unverified   ○ needs capture",
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                }
-            }
-        }
-
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Pictograms (${Pictograms.ids.size})",
-                        style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "Official app table. Two tables disagree upstream — " +
-                            "see docs/NAVIGATION.md if an arrow renders wrong.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
-
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Navigation display", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "Every instruction is compressed before it is sent: " +
-                            "Turn left onto Example Road becomes <- LFT to Example Rd.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        "The arrow prefix marks the turn at a glance " +
-                            "(<- left, -> right, ^ straight, U U-turn, O roundabout).",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        "Text wider than the row scrolls one window per send " +
-                            "instead of clipping its tail.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        "Both cluster lines go out together (0x4F + 0x50, rows = 2); " +
-                            "a single alternating line when the second has nothing to show.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        "Compression, arrows and scrolling run on the phone and are " +
-                            "unit-tested. Whether the Ntorq renders both lines at once " +
-                            "still needs your vehicle.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Filled.Science, null)
-                    Text("TVSRide", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "No account. No TVS server. No INTERNET permission.",
-                        style = MaterialTheme.typography.bodySmall,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            }
-        }
+        // Keyed so an import that restores the call reply is read again.
+        item { key(settingsVersion) { AlertsCard() } }
 
         item {
             Text("YOUR DATA", style = MaterialTheme.typography.labelMedium,
@@ -359,31 +190,107 @@ fun MoreScreen(
         }
 
         item {
-            val ctx = LocalContext.current
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Export rides and settings as JSON. " +
-                            "Everything stays on your device unless you share it.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    OutlinedButton(onClick = {
-                        val json = DataExport.buildJson(ctx)
-                        val intent = Intent(Intent.ACTION_SEND).apply {
-                            type = "application/json"
-                            putExtra(Intent.EXTRA_SUBJECT, "TVSRide export")
-                            putExtra(Intent.EXTRA_TEXT, json)
-                        }
-                        ctx.startActivity(Intent.createChooser(intent, "Export data"))
-                    }) {
-                        Text("Export & share")
-                    }
-                }
-            }
+            DataCard(
+                onSettingsRestored = { s ->
+                    settingsVersion++
+                    // Store them the way an edit would, which also sends the
+                    // new names to the bike when it is connected.
+                    s.riderName?.let { onRiderNameChange(RidePrefs.load(ctx).riderName) }
+                    s.deviceNickname?.let { onDeviceNicknameChange(RidePrefs.load(ctx).deviceNickname) }
+                },
+            )
         }
 
         item { Spacer(Modifier.height(8.dp)) }
+    }
+}
+
+/**
+ * Export the rides and settings to a JSON file and share it, or read an export
+ * back in. Files go through the share sheet and the system file picker, so no
+ * storage permission is needed.
+ */
+@Composable
+private fun DataCard(onSettingsRestored: (DataImport.Settings) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch {
+            status = try {
+                val text = withContext(Dispatchers.IO) {
+                    ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() }
+                } ?: throw DataImport.NotAnExport("unreadable")
+                val contents = DataImport.parse(text)
+                val rides = Session.editRides { DataImport.merge(it, contents) }
+                val restored = DataImport.restore(RidePrefs.load(ctx), contents.settings)
+                if (restored > 0) onSettingsRestored(contents.settings)
+                DataImport.message(rides, restored)
+            } catch (e: DataImport.NotAnExport) {
+                "Not a TVSRide export file"
+            } catch (e: Exception) {
+                Log.w("DataCard", "Import failed", e)
+                "Could not read that file"
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Export or import rides and settings as a JSON file. " +
+                    "Everything stays on your device unless you share it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            try {
+                                val uri = withContext(Dispatchers.IO) { DataExport.writeFile(ctx) }
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "application/json"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    putExtra(Intent.EXTRA_SUBJECT, "TVSRide export")
+                                    clipData = ClipData.newRawUri("TVSRide export", uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                ctx.startActivity(Intent.createChooser(intent, "Export data"))
+                                status = null
+                            } catch (e: Exception) {
+                                Log.w("DataCard", "Export failed", e)
+                                status = "Could not write the export file"
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                ) {
+                    Text("Export & share")
+                }
+                OutlinedButton(
+                    enabled = !busy,
+                    // Many file managers label .json as octet-stream or text.
+                    onClick = {
+                        picker.launch(arrayOf("application/json", "application/octet-stream", "text/*"))
+                    },
+                ) {
+                    Text("Import file")
+                }
+            }
+            status?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 
@@ -605,13 +512,16 @@ private fun AppearanceCard() {
 }
 
 /**
- * The Apache's handlebar end-call button: a ringing call is rejected and,
- * when on, the caller (contacts only) gets this text. See CallReply.
+ * Calls, messages and the call reply, in one card. The reply is for the
+ * Apache's handlebar end-call button: a ringing call is rejected and, when on,
+ * the caller (contacts only) gets this text. See CallReply.
  */
 @Composable
-private fun CallReplyCard() {
+private fun AlertsCard() {
     val ctx = LocalContext.current
     val prefs = remember { RidePrefs.load(ctx) }
+    var mirrorCalls by remember { mutableStateOf(prefs.mirrorPhoneCalls) }
+    var mirrorMessages by remember { mutableStateOf(prefs.mirrorMessages) }
     var enabled by remember { mutableStateOf(prefs.callReplyEnabled) }
     var saved by remember { mutableStateOf(prefs.callReplyText) }
     var editing by remember { mutableStateOf(prefs.callReplyText ?: RidePrefs.DEFAULT_CALL_REPLY) }
@@ -624,26 +534,20 @@ private fun CallReplyCard() {
     }
     val max = RidePrefs.MAX_CALL_REPLY_CHARS
     Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text("Reply when I reject a call", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Press the handlebar call button twice (Apache RTR 160 4V) to end the call; " +
-                            "one press only hides it on the dashboard. " +
-                            "When this is on, a caller in your contacts also gets this text by SMS. " +
-                            "Normal SMS charges apply.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                AppSwitch(
-                    checked = enabled,
-                    onCheckedChange = {
-                        enabled = it
-                        prefs.callReplyEnabled = it
-                    },
-                )
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            AlertSwitch("Phone & app calls", mirrorCalls) {
+                mirrorCalls = it
+                prefs.mirrorPhoneCalls = it
+            }
+            HorizontalDivider()
+            AlertSwitch("Messages", mirrorMessages) {
+                mirrorMessages = it
+                prefs.mirrorMessages = it
+            }
+            HorizontalDivider()
+            AlertSwitch("Reply when I reject a call", enabled) {
+                enabled = it
+                prefs.callReplyEnabled = it
             }
             OutlinedTextField(
                 value = editing,
@@ -654,7 +558,10 @@ private fun CallReplyCard() {
                 modifier = Modifier.fillMaxWidth(),
                 supportingText = { Text("${editing.length}/$max") },
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Button(enabled = enabled, onClick = {
                     val trimmed = editing.trim()
                     // Saving the default text stores nothing, so it follows the default.
@@ -667,11 +574,12 @@ private fun CallReplyCard() {
                     saved = null
                     editing = RidePrefs.DEFAULT_CALL_REPLY
                 }) { Text("Reset") }
+                Text(
+                    if (saved == null) "Using the default text" else "Saved",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            Text(
-                if (saved == null) "Using the default text" else "Saved",
-                style = MaterialTheme.typography.bodySmall,
-            )
             if (missing.isNotEmpty()) {
                 Text(
                     "Needs permission to end calls, send SMS and read the caller from the call log and contacts.",
@@ -683,5 +591,17 @@ private fun CallReplyCard() {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AlertSwitch(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f).padding(end = 12.dp))
+        AppSwitch(checked = checked, onCheckedChange = onChange)
     }
 }

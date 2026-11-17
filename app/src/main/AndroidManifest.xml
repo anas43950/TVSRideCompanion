@@ -9,17 +9,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
-    <!-- Map tiles, route search and turn-by-turn routing for the embedded map.
-         Introduced for on-device OpenStreetMap navigation (see docs/MAPS.md).
-         This is network access with a closed destination list, not a cloud
-         account: tile.openstreetmap.org for tiles, router.project-osrm.org for
-         keyless demo routing, api.graphhopper.com / api.mapbox.com only when
-         the rider enters their own key (BYOK), nominatim.openstreetmap.org for
-         place search. There is still no TVS account, no TVS server contact,
-         and no telemetry upload anywhere in the app — grep the tree for
-         HttpURLConnection if you do not believe the comment. -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- No INTERNET permission, on purpose. The app speaks only to the
+         cluster over BLE; nothing it holds (rides, contacts, call log) has
+         a way off the phone except a file the rider shares from More. -->
 
     <!-- Read navigation from any maps app -->
     <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
@@ -62,14 +54,10 @@
          READ_CALL_LOG     - missed calls, which the cluster shows like an SMS
          READ_CONTACTS     - resolve a number to a name for the display
 
-         What the data can do: the app now holds INTERNET for map tiles and
-         routing (see above), so the old "nowhere to send them" argument no
-         longer applies and is not repeated here. The replacement guarantee is
-         narrower and checkable: no code path transmits contact or call-log
-         data. The only consumers are the caller-ID formatter (renders as
-         bytes on the cluster) and the on-device contact resolver. The
-         network call sites are confined to dev.tvsopen.nav.maps; grep
-         HttpURLConnection to verify nothing else opens a connection.
+         What the data can do: nothing beyond the phone. The app has no
+         INTERNET permission, so there is nowhere to send it. The only
+         consumers are the caller-ID formatter (renders as bytes on the
+         cluster) and the on-device contact resolver.
 
          Call reply (the Apache's handlebar end-call button), asked for from
          the More screen and the first-run prompt:
@@ -92,14 +80,10 @@
     <!-- Parked location, only when the user asks for it -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- No TVS contact, enforced by architecture rather than by audit.
-         The app holds INTERNET solely for map tiles and routing (see the
-         permission comment above and docs/MAPS.md). It never talks to TVS:
-         no account, no registration, no SmartXonnect backend calls, and no
-         telemetry upload. The network call sites are confined to
-         dev.tvsopen.nav.maps; anything opening a connection from anywhere
-         else is a bug. Contact and call-log data stay on the device — they
-         are read only to render caller ID as bytes on the cluster. -->
+    <!-- No TVS contact, enforced by the build rather than by audit. Without
+         INTERNET the app cannot reach any server: no account, no
+         registration, no SmartXonnect backend calls, no telemetry upload.
+         CI asserts the permission stays absent from the merged manifest. -->
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -116,8 +100,16 @@
     <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
     <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
 
+    <!-- Android Auto Backup: the OS copies the ride history and settings to the
+         rider's own Google Drive, and restores them on a reinstall or a new
+         phone. No INTERNET permission is involved — the system backup transport
+         does the upload, not the app, so "no account, no cloud" still holds.
+         The rules allowlist the rides DB and the shared prefs and leave the
+         frame log (street names, cluster MAC) off Drive. -->
     <application
-        android:allowBackup="false"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="TVSRide"
@@ -160,6 +152,18 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- Lends the data export file to the app the rider shares it with,
+             read-only and only for that share. Not exported. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="dev.tvsopen.export"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/export_paths" />
+        </provider>
 
         <!-- The whole point: read turn-by-turn from Google Maps or any other
              maps app without an account anywhere. -->

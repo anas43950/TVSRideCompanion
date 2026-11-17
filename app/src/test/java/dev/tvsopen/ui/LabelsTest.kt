@@ -2,6 +2,7 @@
 
 package dev.tvsopen.ui
 
+import dev.tvsopen.session.Telemetry
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -12,6 +13,29 @@ class LabelsTest {
         assertEquals("N", gearLabel(0))
         assertEquals("3", gearLabel(3))
         assertEquals("—", gearLabel(null))
+    }
+
+    @Test
+    fun `disconnected keeps saved fuel and distance, blanks live data`() {
+        val live = Telemetry(
+            speedKmh = 42,
+            gear = 3,
+            topSpeedKmh = 88,
+            engineRpm = 4200,
+            fuelBars = 6,
+            lowFuel = false,
+            odometerKm = 1234.5,
+            odometerAtConnectKm = 1200.0,
+        )
+        // Connected: the real snapshot flows through untouched.
+        assertEquals(live, shownTelemetry(live, connected = true))
+        // Disconnected: only the persisted last-known readings remain — fuel
+        // and total distance stay visible, live tiles fall back to "—", and
+        // "This connection" is gone with odometerAtConnectKm dropped.
+        assertEquals(
+            Telemetry(fuelBars = 6, lowFuel = false, odometerKm = 1234.5),
+            shownTelemetry(live, connected = false),
+        )
     }
 
     @Test

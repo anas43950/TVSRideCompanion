@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What the export FileProvider may hand out: the export folder in the app's
+     cache, and nothing else. See DataExport.writeFile. -->
+<paths>
+    <cache-path name="export" path="export/" />
+</paths>

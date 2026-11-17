@@ -1,7 +1,7 @@
 // When a connection is a new ride, the same ride, or not a ride at all.
 //
-// Pure: no Android, no clock, no storage. RideLog applies these results to
-// SharedPreferences; the tests drive them directly.
+// Pure: no Android, no clock, no storage. RideLog applies these results and
+// stores them in the ride database; the tests drive them directly.
 //
 // The rules, as the rider chose them:
 // - A reconnect within MERGE_GAP_MS of the last disconnect (or of the last

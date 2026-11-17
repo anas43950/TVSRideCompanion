@@ -7,18 +7,20 @@
 // distance is the odometer delta from its first reading, its duration is wall
 // clock, its top speed the highest live speed seen while connected.
 //
-// The consequence is deliberate and stated in the UI: a ride recorded here
-// exists only on this phone and is lost on uninstall. That is the price of
-// having no account, and it is a fair trade for not needing one.
+// The consequence is deliberate: a ride recorded here exists only on this
+// phone and is lost on uninstall unless exported first (More → Your data).
+// That is the price of having no account, and a fair trade for not needing one.
 
 package dev.tvsopen.session
 
 import android.content.Context
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import org.json.JSONArray
-import org.json.JSONObject
+import dev.tvsopen.log.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** One ride, open or closed. */
 data class Ride(
@@ -62,98 +64,77 @@ data class Ride(
 }
 
 /**
- * Bounded local ride log.
+ * Local ride log: every ride, plus two running totals.
  *
- * Keeps [MAX_RIDES] recent rides plus two running totals that survive the
- * window. Plain JSON in SharedPreferences, readable over `adb` when something
- * looks wrong. What counts as a ride, and when two connections are one ride,
- * is decided by [RideRules]; this class only stores the result.
+ * The rides are held in memory and stored in [RideDatabase]; each save writes
+ * only the rows that changed, normally just the open ride. What counts as a
+ * ride, and when two connections are one ride, is decided by [RideRules]; this
+ * class only applies and stores the result.
+ *
+ * All work runs in order on one background thread, because Room refuses the
+ * main thread: [start], [update], [finish] and [edit] queue behind the initial
+ * load, so a connect that arrives during startup still sees every ride.
+ * Changes are reported through [onChange], from that thread.
  */
-class RideLog(context: Context) {
+@OptIn(ExperimentalCoroutinesApi::class)
+class RideLog(
+    context: Context,
+    private val onChange: (rides: List<Ride>, totals: RideRules.Totals) -> Unit,
+) {
 
-    private val sp = context.applicationContext
-        .getSharedPreferences("tvsride", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
 
-    private var state: RideRules.State
+    private val worker = Dispatchers.IO.limitedParallelism(1)
+    private val scope = CoroutineScope(SupervisorJob() + worker)
+
+    private var state = RideRules.State(emptyList(), RideRules.Totals(0, 0.0))
     private var lastSavedAt = 0L
 
-    private val _rides = MutableStateFlow<List<Ride>>(emptyList())
+    /** Database access; null if the database could not be opened. */
+    private var dao: RideDao? = null
 
-    /** Most recent first; only what [RideRules.visible] lets through. */
-    val rides: StateFlow<List<Ride>> = _rides.asStateFlow()
-
-    /** Every counted ride ever, including ones the bounded window has dropped. */
-    val totalRides: Int get() = state.totals.rides
-
-    /** Running total across all counted rides, not just the retained window. */
-    val totalDistanceKm: Double get() = state.totals.distanceKm
+    /** The rides as the database holds them, so a save writes only the difference. */
+    private var written: List<Ride> = emptyList()
 
     init {
-        val now = System.currentTimeMillis()
-        val s = RideRules.State(
-            load(),
-            RideRules.Totals(
-                sp.getInt(KEY_TOTAL, 0),
-                sp.getString(KEY_DIST, null)?.toDoubleOrNull() ?: 0.0,
-            ),
-        )
-        state = s
-        commit(RideRules.settle(s, now))
+        scope.launch {
+            val loaded = runCatching {
+                val d = RideDatabase.get(appContext).rides()
+                val s = RideRules.State(
+                    d.all().map(RideRow::toRide),
+                    d.totals()?.toTotals() ?: RideRules.Totals(0, 0.0),
+                )
+                dao = d
+                s
+            }.getOrElse { e ->
+                // Rides still track in memory; they just are not saved this launch.
+                Log.e(TAG, "Ride database unavailable; rides will not be saved", e)
+                state
+            }
+            state = loaded
+            written = loaded.rides
+            commit(RideRules.settle(loaded, System.currentTimeMillis()))
+        }
     }
 
-    private fun load(): List<Ride> = runCatching {
-        val arr = JSONArray(sp.getString(KEY, "[]") ?: "[]")
-        (0 until arr.length()).mapNotNull { i ->
-            val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            Ride(
-                startedAt = o.optLong("s"),
-                endedAt = if (o.isNull("e")) null else o.optLong("e"),
-                distanceKm = o.optDouble("d", 0.0),
-                topSpeedKmh = if (o.has("t") && !o.isNull("t")) o.optInt("t") else null,
-                startOdometerKm = if (o.has("o") && !o.isNull("o")) o.optDouble("o") else null,
-                lastSeenAt = if (o.has("l") && !o.isNull("l")) o.optLong("l") else null,
-            )
-        }
-    }.getOrDefault(emptyList())
-
-    /**
-     * Store [s] and publish it.
-     *
-     * The window is trimmed in memory too, not only in what is written, so
-     * the screen never shows a ride that storage has already dropped. The
-     * totals are kept separately and are not reduced by the trim.
-     */
-    private fun commit(full: RideRules.State) {
-        val s = if (full.rides.size > MAX_RIDES) full.copy(rides = full.rides.take(MAX_RIDES)) else full
+    /** Store [s] and publish it. */
+    private fun commit(s: RideRules.State) {
         state = s
-        val arr = JSONArray()
-        s.rides.forEach { r ->
-            arr.put(
-                JSONObject()
-                    .put("s", r.startedAt)
-                    .put("e", r.endedAt ?: JSONObject.NULL)
-                    .put("d", r.distanceKm)
-                    .put("t", r.topSpeedKmh ?: JSONObject.NULL)
-                    .put("o", r.startOdometerKm ?: JSONObject.NULL)
-                    .put("l", r.lastSeenAt ?: JSONObject.NULL),
-            )
+        val d = dao
+        if (d != null) {
+            val changes = RideChanges.diff(written, s.rides)
+            runCatching { d.apply(changes, s.totals) }
+                .onSuccess { written = s.rides }
+                // `written` stays as it was, so the next save retries these rows.
+                .onFailure { Log.e(TAG, "Saving rides failed", it) }
         }
-        sp.edit()
-            .putString(KEY, arr.toString())
-            .putInt(KEY_TOTAL, s.totals.rides)
-            .putString(KEY_DIST, s.totals.distanceKm.toString())
-            .apply()
         lastSavedAt = System.currentTimeMillis()
-        publish()
-    }
-
-    private fun publish() {
-        _rides.value = RideRules.visible(state.rides)
+        onChange(RideRules.visible(s.rides), s.totals)
     }
 
     /** The link came up: continue, rejoin or start a ride. */
     fun start(now: Long = System.currentTimeMillis()) {
-        commit(RideRules.onConnect(state, now))
+        scope.launch { commit(RideRules.onConnect(state, now)) }
     }
 
     /**
@@ -164,27 +145,34 @@ class RideLog(context: Context) {
      * the log is never a disk write at telemetry rate.
      */
     fun update(odometerKm: Double?, speedKmh: Int?, now: Long = System.currentTimeMillis()) {
-        val open = state.rides.firstOrNull()?.takeIf { it.inProgress } ?: return
-        val next = state.copy(rides = listOf(RideRules.onSample(open, odometerKm, speedKmh, now)) + state.rides.drop(1))
-        if (now - lastSavedAt >= RideRules.SAVE_EVERY_MS) {
-            commit(next)
-        } else {
-            state = next
-            publish()
+        scope.launch {
+            val open = state.rides.firstOrNull()?.takeIf { it.inProgress } ?: return@launch
+            val next = state.copy(rides = listOf(RideRules.onSample(open, odometerKm, speedKmh, now)) + state.rides.drop(1))
+            if (now - lastSavedAt >= RideRules.SAVE_EVERY_MS) {
+                commit(next)
+            } else {
+                state = next
+                onChange(RideRules.visible(next.rides), next.totals)
+            }
         }
     }
 
     /** The link went down: close the open ride, counting it if long enough. */
     fun finish(now: Long = System.currentTimeMillis()) {
-        commit(RideRules.onDisconnect(state, now))
+        scope.launch { commit(RideRules.onDisconnect(state, now)) }
+    }
+
+    /**
+     * Change the rides in one step, such as an import: [block] gets the
+     * current rides and totals and returns the new ones plus a result.
+     */
+    suspend fun <T> edit(block: (RideRules.State) -> Pair<RideRules.State, T>): T = withContext(worker) {
+        val (next, result) = block(state)
+        commit(next)
+        result
     }
 
     companion object {
-        private const val KEY = "ride_log"
-        private const val KEY_TOTAL = "ride_total_count"
-        private const val KEY_DIST = "ride_total_distance"
-
-        /** About a year of rides at a few a day; roughly 100 KB of JSON. */
-        private const val MAX_RIDES = 1000
+        private const val TAG = "RideLog"
     }
 }

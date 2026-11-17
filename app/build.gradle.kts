@@ -6,6 +6,8 @@ plugins {
     // Kotlin 2.0 moved Compose compilation into a compiler plugin; the old
     // `kotlinCompilerExtensionVersion` string is rejected outright.
     id("org.jetbrains.kotlin.plugin.compose")
+    // Generates the Room database code for the ride log.
+    id("com.google.devtools.ksp")
 }
 
 /**
@@ -86,6 +88,12 @@ android {
     }
 }
 
+// The ride database schema, one JSON file per version, checked in so a later
+// change to the tables has something to write a migration against.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
@@ -111,12 +119,14 @@ dependencies {
     // the double-division bug that made the odometer read 10x low was invisible
     // to the compiler and to every smoke test on a disconnected phone.
     testImplementation("junit:junit:4.13.2")
+    // The real org.json for JVM tests: android.jar's copy is a stub that
+    // throws, and export, import and the ride-log migration all speak JSON.
+    testImplementation("org.json:json:20240303")
 
-    // Embedded OpenStreetMap view (docs/MAPS.md). Pinned, not ranged: tile
-    // fetching behaviour must not shift under a future release unreviewed.
-    // Verified not to add INTERNET itself — the permission is declared
-    // explicitly in the manifest for map use; CI pins the merged set.
-    implementation("org.osmdroid:osmdroid-android:6.1.20")
+    // Ride history. 2.6.x is the last line that builds against compileSdk 34.
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
 }
 
 // CPU budget: see AGENTS.md and gradle.properties — workers.max=2, daemon off.

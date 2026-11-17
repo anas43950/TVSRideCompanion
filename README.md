@@ -12,9 +12,8 @@ Google Maps / MapMyIndia / Organic Maps / Waze
   NotificationListenerService  ──►  pictogram + text  ──►  BLE  ──►  cluster
 ```
 
-`INTERNET` is declared only for embedded map tiles, place search and routing
-(OpenStreetMap / user-supplied routing keys where configured). It is never used
-to contact TVS or to upload data, and contact/call-log data stays on the device.
+The app has no `INTERNET` permission. It never contacts TVS or any other
+server, and rides, contacts and call-log data stay on the device.
 
 ---
 
@@ -81,8 +80,8 @@ evidence as in the display.
 Those are two very different claims and it is worth keeping them apart.
 
 `:app:assembleDebug` succeeds with zero warnings; CI runs the unit tests and
-asserts the merged manifest's permission set (including `INTERNET` for embedded
-maps, and the expected BLE/caller-ID permissions). The app has been installed
+asserts the merged manifest's permission set (no `INTERNET`, and the expected
+BLE/caller-ID permissions). The app has been installed
 and driven on a real device many times — which is how the Overview/Log tab swap,
 an unreachable Ride Mode toggle, and a log sink that discarded every session
 were all found. None of them were visible to any test.
