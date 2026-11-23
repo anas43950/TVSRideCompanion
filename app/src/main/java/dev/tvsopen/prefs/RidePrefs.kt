@@ -11,6 +11,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
+/**
+ * What the Apache handlebar button does to a ringing call. The cluster only
+ * sends the button event while a call is ringing, so there is no in-progress
+ * case: REJECT (the default, today's behaviour) ends the call and can text the
+ * caller; ACCEPT answers it. See CallReply.
+ */
+enum class HandlebarCallAction(val label: String) {
+    REJECT("Reject"),
+    ACCEPT("Accept"),
+}
+
 class RidePrefs private constructor(private val ctx: Context) {
 
     private val sp = ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -141,6 +152,16 @@ class RidePrefs private constructor(private val ctx: Context) {
         get() = sp.getBoolean(KEY_CALL_REPLY_ENABLED, true)
         set(value) { sp.edit().putBoolean(KEY_CALL_REPLY_ENABLED, value).apply() }
 
+    /**
+     * What the handlebar button does to a ringing call: reject (default) or
+     * answer. Reject keeps the reply SMS; answer takes the call. See CallReply.
+     */
+    var handlebarCallAction: HandlebarCallAction
+        get() = sp.getString(KEY_HANDLEBAR_CALL_ACTION, null)
+            ?.let { raw -> HandlebarCallAction.entries.firstOrNull { it.name == raw } }
+            ?: HandlebarCallAction.REJECT
+        set(value) { sp.edit().putString(KEY_HANDLEBAR_CALL_ACTION, value.name).apply() }
+
     /** The reply text; null (the default) means [DEFAULT_CALL_REPLY]. */
     var callReplyText: String?
         get() = sp.getString(KEY_CALL_REPLY_TEXT, null)
@@ -172,6 +193,7 @@ class RidePrefs private constructor(private val ctx: Context) {
         private const val KEY_MIRROR_MESSAGES = "mirror_messages"
         private const val KEY_CALL_REPLY_ENABLED = "call_reply_enabled"
         private const val KEY_CALL_REPLY_TEXT = "call_reply_text"
+        private const val KEY_HANDLEBAR_CALL_ACTION = "handlebar_call_action"
         const val DEFAULT_CALL_REPLY = "Riding the bike currently, call again if it's urgent."
         const val MAX_CALL_REPLY_CHARS = 160
         private const val KEY_SELECTED_MODEL_PREFIX = "selected_model_"

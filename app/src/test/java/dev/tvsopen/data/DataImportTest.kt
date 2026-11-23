@@ -3,6 +3,7 @@
 
 package dev.tvsopen.data
 
+import dev.tvsopen.prefs.HandlebarCallAction
 import dev.tvsopen.session.Ride
 import dev.tvsopen.session.RideRules
 import org.junit.Assert.assertEquals
@@ -20,6 +21,7 @@ class DataImportTest {
         callReplyEnabled = false,
         callReplyText = "Riding, will call back",
         deviceNickname = "Example Phone",
+        handlebarCallAction = "ACCEPT",
     )
 
     private val a = Ride(1700000000000, 1700000600000, 12.3, 71)
@@ -86,7 +88,7 @@ class DataImportTest {
     }
 
     @Test
-    fun `greeting, call reply and device name come back from the file`() {
+    fun `greeting, call reply, device name and button action come back from the file`() {
         val got = export(listOf(a), RideRules.Totals(1, 12.3)).settings
         assertEquals(
             DataImport.Settings(
@@ -94,10 +96,11 @@ class DataImportTest {
                 callReplyEnabled = false,
                 callReplyText = DataImport.Present("Riding, will call back"),
                 deviceNickname = DataImport.Present("Example Phone"),
+                handlebarCallAction = HandlebarCallAction.ACCEPT,
             ),
             got,
         )
-        assertEquals(4, got.count)
+        assertEquals(5, got.count)
     }
 
     @Test

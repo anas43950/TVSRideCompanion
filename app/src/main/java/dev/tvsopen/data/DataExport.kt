@@ -49,6 +49,8 @@ object DataExport {
         val callReplyText: String?,
         /** Null means the default name. */
         val deviceNickname: String?,
+        /** The handlebar button's action, as [dev.tvsopen.prefs.HandlebarCallAction.name]. */
+        val handlebarCallAction: String,
     )
 
     /** The export document. Pure, so the tests can read what it writes. */
@@ -85,7 +87,8 @@ object DataExport {
                     .put("theme", settings.theme)
                     .put("callReplyEnabled", settings.callReplyEnabled)
                     .put("callReplyText", settings.callReplyText ?: JSONObject.NULL)
-                    .put("deviceNickname", settings.deviceNickname ?: JSONObject.NULL),
+                    .put("deviceNickname", settings.deviceNickname ?: JSONObject.NULL)
+                    .put("handlebarCallAction", settings.handlebarCallAction),
             )
             .toString(2)
     }
@@ -105,6 +108,7 @@ object DataExport {
                 callReplyEnabled = prefs.callReplyEnabled,
                 callReplyText = prefs.callReplyText,
                 deviceNickname = prefs.deviceNickname,
+                handlebarCallAction = prefs.handlebarCallAction.name,
             ),
             exportedAt = System.currentTimeMillis(),
         )

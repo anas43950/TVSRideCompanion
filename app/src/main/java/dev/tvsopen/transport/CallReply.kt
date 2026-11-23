@@ -1,14 +1,16 @@
-// The Apache's handlebar end-call button, and the reply SMS it can send.
+// The Apache's handlebar call button, and the reply SMS it can send.
 //
-// The cluster reports the button as an N112 `Y` record; 1 asks to end the
-// call. The official app (N112ClusterDataReceiver.parseDisconnectCall) then
-// rejects the call and, when its "auto-reply SMS" setting is on, texts the
-// caller. This does the same, with the rider's choices:
-// - a ringing call is rejected and the caller gets the reply; a call already
-//   in progress is only ended;
-// - the reply goes to contacts only, and has its own switch (default on);
-// - the number comes from the call log once the rejected call lands there,
-//   so no number is ever guessed from a notification.
+// The cluster reports the button as an N112 `Y` record (value 1), and only
+// while a call is ringing. The rider chooses what it does (RidePrefs
+// .handlebarCallAction):
+// - REJECT (the default, and what the official app's parseDisconnectCall does):
+//   the ringing call is rejected and, when the reply switch is on, the caller
+//   gets the text;
+// - ACCEPT: the ringing call is answered, and no reply is sent (you took it).
+//
+// The reply goes to contacts only, has its own switch (default on), and the
+// number comes from the call log once the rejected call lands there, so no
+// number is ever guessed from a notification.
 
 package dev.tvsopen.transport
 
@@ -27,6 +29,7 @@ import android.view.KeyEvent
 import android.media.AudioManager
 import androidx.core.content.ContextCompat
 import dev.tvsopen.log.Log
+import dev.tvsopen.prefs.HandlebarCallAction
 import dev.tvsopen.prefs.RidePrefs
 import dev.tvsopen.session.ClusterAlert
 import dev.tvsopen.session.Session
@@ -85,14 +88,23 @@ class CallReply(context: Context) {
         if (!CallReplyRules.isPress(value, now, lastPressAt)) return
         lastPressAt = now
         val ringing = isRinging()
-        Log.i(TAG, "handlebar end-call button (ringing=$ringing)")
+        val prefs = RidePrefs.load(app)
+        val action = prefs.handlebarCallAction
+        Log.i(TAG, "handlebar button (action=$action, ringing=$ringing)")
+
+        if (action == HandlebarCallAction.ACCEPT) {
+            // Answer the ringing call; nothing to reply, you took it.
+            if (!answerCall()) Log.w(TAG, "could not answer the call")
+            return
+        }
+
+        // REJECT (default): reject the call, then the reply.
         // Before ending the call: the newest entry already logged, so the
         // rejected call can be told apart from an older missed one.
         val before = newestCall()?.dateMs
         if (!endCall()) Log.w(TAG, "could not end the call")
         if (!ringing) return
 
-        val prefs = RidePrefs.load(app)
         if (!prefs.callReplyEnabled) return
         if (!granted(Manifest.permission.SEND_SMS)) {
             Log.w(TAG, "call reply skipped: SMS permission not granted")
@@ -141,6 +153,26 @@ class CallReply(context: Context) {
             val telecom = app.getSystemService(TelecomManager::class.java)
             val ended = runCatching { telecom?.endCall() }.getOrNull()
             if (ended == true) return true
+        }
+        val audio = app.getSystemService(AudioManager::class.java) ?: return false
+        return runCatching {
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HEADSETHOOK))
+            audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_HEADSETHOOK))
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Answer the ringing call. `TelecomManager.acceptRingingCall` needs
+     * ANSWER_PHONE_CALLS (API 26+); it is a no-op when nothing is ringing.
+     * Without the permission, the headset hook key answers on most phones.
+     */
+    @SuppressLint("MissingPermission")
+    @Suppress("DEPRECATION")
+    private fun answerCall(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && granted(Manifest.permission.ANSWER_PHONE_CALLS)) {
+            val telecom = app.getSystemService(TelecomManager::class.java)
+            if (telecom != null && runCatching { telecom.acceptRingingCall() }.isSuccess) return true
         }
         val audio = app.getSystemService(AudioManager::class.java) ?: return false
         return runCatching {

@@ -23,7 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -512,8 +512,8 @@ class MainActivity : AppCompatActivity() {
                         NavigationBarItem(
                             selected = tab == TAB_MORE,
                             onClick = { tab = TAB_MORE },
-                            icon = { Icon(Icons.Filled.MoreHoriz, contentDescription = "More") },
-                            label = { Text("More") },
+                            icon = { Icon(Icons.Filled.Settings, contentDescription = "Settings") },
+                            label = { Text("Settings") },
                         )
                         NavigationBarItem(
                             selected = tab == TAB_LOG,

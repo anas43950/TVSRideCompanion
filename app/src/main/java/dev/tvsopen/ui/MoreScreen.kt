@@ -1,5 +1,6 @@
 package dev.tvsopen.ui
 
+import android.Manifest
 import android.content.Context
 import dev.tvsopen.transport.CallReply
 import androidx.core.content.ContextCompat
@@ -54,6 +55,7 @@ import dev.tvsopen.session.Session
 import android.content.ClipData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import dev.tvsopen.prefs.HandlebarCallAction
 import dev.tvsopen.prefs.RidePrefs
 import dev.tvsopen.protocol.ApacheN112Driver
 import dev.tvsopen.transport.label
@@ -125,6 +127,38 @@ fun MoreScreen(
         }
 
         item {
+            Text("NAMES", style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        item {
+            NamesCard(
+                riderName = rider,
+                onRiderNameChange = onRiderNameChange,
+                nickname = nickname,
+                onNicknameChange = onDeviceNicknameChange,
+            )
+        }
+
+        item {
+            Text("ALERTS", style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        item { AlertsCard() }
+
+        item {
+            Text("HANDLE BUTTON BEHAVIOUR", style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        // Keyed so an import that restores the call reply is read again.
+        item { key(settingsVersion) { HandleButtonCard() } }
+
+        item {
             Text("KEEP THE CONNECTION ALIVE", style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -158,30 +192,6 @@ fun MoreScreen(
         }
 
         item { AppearanceCard() }
-
-        item {
-            Text("NAMES", style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        item {
-            NamesCard(
-                riderName = rider,
-                onRiderNameChange = onRiderNameChange,
-                nickname = nickname,
-                onNicknameChange = onDeviceNicknameChange,
-            )
-        }
-
-        item {
-            Text("ALERTS", style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        // Keyed so an import that restores the call reply is read again.
-        item { key(settingsVersion) { AlertsCard() } }
 
         item {
             Text("YOUR DATA", style = MaterialTheme.typography.labelMedium,
@@ -512,9 +522,8 @@ private fun AppearanceCard() {
 }
 
 /**
- * Calls, messages and the call reply, in one card. The reply is for the
- * Apache's handlebar end-call button: a ringing call is rejected and, when on,
- * the caller (contacts only) gets this text. See CallReply.
+ * Calls and messages mirrored to the cluster. The handlebar button's own
+ * behaviour (and its reply) lives in [HandleButtonCard].
  */
 @Composable
 private fun AlertsCard() {
@@ -522,17 +531,6 @@ private fun AlertsCard() {
     val prefs = remember { RidePrefs.load(ctx) }
     var mirrorCalls by remember { mutableStateOf(prefs.mirrorPhoneCalls) }
     var mirrorMessages by remember { mutableStateOf(prefs.mirrorMessages) }
-    var enabled by remember { mutableStateOf(prefs.callReplyEnabled) }
-    var saved by remember { mutableStateOf(prefs.callReplyText) }
-    var editing by remember { mutableStateOf(prefs.callReplyText ?: RidePrefs.DEFAULT_CALL_REPLY) }
-    fun missingPermissions() = CallReply.PERMISSIONS.filter {
-        ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
-    }
-    var missing by remember { mutableStateOf(missingPermissions()) }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        missing = missingPermissions()
-    }
-    val max = RidePrefs.MAX_CALL_REPLY_CHARS
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             AlertSwitch("Phone & app calls", mirrorCalls) {
@@ -544,45 +542,104 @@ private fun AlertsCard() {
                 mirrorMessages = it
                 prefs.mirrorMessages = it
             }
-            HorizontalDivider()
-            AlertSwitch("Reply when I reject a call", enabled) {
-                enabled = it
-                prefs.callReplyEnabled = it
-            }
-            OutlinedTextField(
-                value = editing,
-                onValueChange = { if (it.length <= max) editing = it },
-                label = { Text("Reply text") },
-                enabled = enabled,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth(),
-                supportingText = { Text("${editing.length}/$max") },
+        }
+    }
+}
+
+/**
+ * The Apache's handlebar button, pressed while a call is ringing: reject the
+ * call (and, when on, text the caller) or answer it. Reject is the default.
+ * The reply controls show only under Reject. See CallReply.
+ */
+@Composable
+private fun HandleButtonCard() {
+    val ctx = LocalContext.current
+    val prefs = remember { RidePrefs.load(ctx) }
+    var action by remember { mutableStateOf(prefs.handlebarCallAction) }
+    var enabled by remember { mutableStateOf(prefs.callReplyEnabled) }
+    var saved by remember { mutableStateOf(prefs.callReplyText) }
+    var editing by remember { mutableStateOf(prefs.callReplyText ?: RidePrefs.DEFAULT_CALL_REPLY) }
+    // Accept only needs to answer the call; Reject also sends the reply SMS.
+    fun needed() = if (action == HandlebarCallAction.ACCEPT) {
+        listOf(Manifest.permission.ANSWER_PHONE_CALLS)
+    } else {
+        CallReply.PERMISSIONS
+    }
+    fun missingPermissions() = needed().filter {
+        ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
+    }
+    var missing by remember { mutableStateOf(missingPermissions()) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        missing = missingPermissions()
+    }
+    val max = RidePrefs.MAX_CALL_REPLY_CHARS
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                "What the handlebar button does to an incoming call.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Button(enabled = enabled, onClick = {
-                    val trimmed = editing.trim()
-                    // Saving the default text stores nothing, so it follows the default.
-                    prefs.callReplyText = trimmed.takeIf { it.isNotEmpty() && it != RidePrefs.DEFAULT_CALL_REPLY }
-                    saved = prefs.callReplyText
-                    editing = saved ?: RidePrefs.DEFAULT_CALL_REPLY
-                }) { Text("Save") }
-                OutlinedButton(enabled = enabled, onClick = {
-                    prefs.callReplyText = null
-                    saved = null
-                    editing = RidePrefs.DEFAULT_CALL_REPLY
-                }) { Text("Reset") }
-                Text(
-                    if (saved == null) "Using the default text" else "Saved",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                HandlebarCallAction.entries.forEach { opt ->
+                    FilterChip(
+                        selected = action == opt,
+                        onClick = {
+                            action = opt
+                            prefs.handlebarCallAction = opt
+                            missing = missingPermissions()
+                        },
+                        label = { Text(opt.label, textAlign = TextAlign.Center) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            if (action == HandlebarCallAction.REJECT) {
+                HorizontalDivider()
+                AlertSwitch("Reply when I reject a call", enabled) {
+                    enabled = it
+                    prefs.callReplyEnabled = it
+                }
+                OutlinedTextField(
+                    value = editing,
+                    onValueChange = { if (it.length <= max) editing = it },
+                    label = { Text("Reply text") },
+                    enabled = enabled,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    supportingText = { Text("${editing.length}/$max") },
                 )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(enabled = enabled, onClick = {
+                        val trimmed = editing.trim()
+                        // Saving the default text stores nothing, so it follows the default.
+                        prefs.callReplyText = trimmed.takeIf { it.isNotEmpty() && it != RidePrefs.DEFAULT_CALL_REPLY }
+                        saved = prefs.callReplyText
+                        editing = saved ?: RidePrefs.DEFAULT_CALL_REPLY
+                    }) { Text("Save") }
+                    OutlinedButton(enabled = enabled, onClick = {
+                        prefs.callReplyText = null
+                        saved = null
+                        editing = RidePrefs.DEFAULT_CALL_REPLY
+                    }) { Text("Reset") }
+                    Text(
+                        if (saved == null) "Using the default text" else "Saved",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             if (missing.isNotEmpty()) {
+                val warning = if (action == HandlebarCallAction.ACCEPT) {
+                    "Needs permission to answer calls."
+                } else {
+                    "Needs permission to end calls, send SMS and read the caller from the call log and contacts."
+                }
                 Text(
-                    "Needs permission to end calls, send SMS and read the caller from the call log and contacts.",
+                    warning,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )

@@ -1,10 +1,11 @@
 // Reading an export file back in: moving to a new phone, or restoring after a
 // reinstall. Rides are merged; of the settings, the console greeting (rider
-// name), call reply (on/off and its text) and the device name are restored.
-// The rest of the file's settings are left alone.
+// name), call reply (on/off and its text), the device name and the handlebar
+// button action are restored. The rest of the file's settings are left alone.
 
 package dev.tvsopen.data
 
+import dev.tvsopen.prefs.HandlebarCallAction
 import dev.tvsopen.prefs.RidePrefs
 import dev.tvsopen.session.Ride
 import dev.tvsopen.session.RideRules
@@ -32,10 +33,13 @@ object DataImport {
         val callReplyEnabled: Boolean? = null,
         val callReplyText: Present<String?>? = null,
         val deviceNickname: Present<String?>? = null,
+        val handlebarCallAction: HandlebarCallAction? = null,
     ) {
         /** How many settings this file carries. */
         val count: Int
-            get() = listOfNotNull(riderName, callReplyEnabled, callReplyText, deviceNickname).size
+            get() = listOfNotNull(
+                riderName, callReplyEnabled, callReplyText, deviceNickname, handlebarCallAction,
+            ).size
     }
 
     /**
@@ -95,6 +99,11 @@ object DataImport {
             },
             callReplyText = text("callReplyText"),
             deviceNickname = text("deviceNickname"),
+            handlebarCallAction = if (p.has("handlebarCallAction") && !p.isNull("handlebarCallAction")) {
+                HandlebarCallAction.entries.firstOrNull { it.name == p.optString("handlebarCallAction") }
+            } else {
+                null
+            },
         )
     }
 
@@ -107,6 +116,7 @@ object DataImport {
         s.callReplyEnabled?.let { prefs.callReplyEnabled = it }
         s.callReplyText?.let { prefs.callReplyText = it.value }
         s.deviceNickname?.let { prefs.deviceNickname = it.value }
+        s.handlebarCallAction?.let { prefs.handlebarCallAction = it }
         return s.count
     }
 
