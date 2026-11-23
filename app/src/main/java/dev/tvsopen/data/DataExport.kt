@@ -27,8 +27,15 @@ object DataExport {
     const val FORMAT = "tvsride-export"
     const val VERSION = 1
 
-    /** Matches the provider in the manifest and `res/xml/export_paths.xml`. */
-    private const val AUTHORITY = "dev.tvsopen.export"
+    /**
+     * The FileProvider authority, derived from the running package so it tracks
+     * the variant. The manifest declares it as `${applicationId}.export`, so the
+     * release build is `dev.tvsopen.export` and the debug build
+     * `dev.tvsopen.debug.export`; a hardcoded constant would be wrong in one of
+     * them. `context.packageName` is the applicationId at runtime, suffix and
+     * all. See the manifest provider and `res/xml/export_paths.xml`.
+     */
+    private fun authority(context: Context) = "${context.packageName}.export"
 
     /** The settings that go into an export. */
     data class Settings(
@@ -114,6 +121,6 @@ object DataExport {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val file = File(dir, "tvsride-export-$stamp.json")
         file.writeText(buildJson(context))
-        return FileProvider.getUriForFile(context, AUTHORITY, file)
+        return FileProvider.getUriForFile(context, authority(context), file)
     }
 }

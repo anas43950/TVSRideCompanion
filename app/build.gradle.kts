@@ -41,6 +41,9 @@ android {
         targetSdk = 34
         versionCode = 3
         versionName = "0.2.0"
+        // The launcher label, as a placeholder so the debug build can override
+        // it (below) and the two variants are told apart on the phone.
+        manifestPlaceholders["appLabel"] = "TVSRide"
     }
 
     signingConfigs {
@@ -60,6 +63,19 @@ android {
         // `adb shell run-as` can still pull the on-device log without root,
         // which is the entire debugging story for this project.
         debug {
+            // A separate applicationId (dev.tvsopen.debug) so the debug build
+            // installs alongside the release build instead of replacing it —
+            // the two are different apps to Android, with separate data, saved
+            // vehicle and auto-connect. Moving rides between them is still an
+            // Export/Import: separate apps do not share a database.
+            //
+            // The FileProvider authority and the launcher label are keyed off
+            // the applicationId too (see the manifest): without that, two apps
+            // declaring the same provider authority cannot both install
+            // (INSTALL_FAILED_CONFLICTING_PROVIDER), which is the whole point.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            manifestPlaceholders["appLabel"] = "TVSRide Debug"
             signingConfig = signingConfigs.findByName("release")
                 ?: signingConfigs.getByName("debug")
         }

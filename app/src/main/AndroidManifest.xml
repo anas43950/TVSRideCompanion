@@ -7,7 +7,12 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- BLE scanning needs location on Android 11 and below. On 12+ the
+         neverForLocation flag on BLUETOOTH_SCAN covers it, so this is dropped
+         there (maxSdkVersion 30) and never appears on a modern phone. The app
+         reads no location of its own. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
 
     <!-- No INTERNET permission, on purpose. The app speaks only to the
          cluster over BLE; nothing it holds (rides, contacts, call log) has
@@ -39,11 +44,6 @@
     <!-- Discovers which navigation app is actually installed, so mirroring is
          not limited to a hardcoded package list. Read-only; sees no app data. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-
-    <!-- "Last Parked" has to be recorded while the phone is in a pocket with
-         the screen off, which only a background location grant permits. -->
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <!-- Caller ID on the cluster. TVS's Ntorq 125 manual lists "CALLER ID and
          SMS notification on speedometer" as a documented feature of the
@@ -77,9 +77,6 @@
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
 
-    <!-- Parked location, only when the user asks for it -->
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-
     <!-- No TVS contact, enforced by the build rather than by audit. Without
          INTERNET the app cannot reach any server: no account, no
          registration, no SmartXonnect backend calls, no telemetry upload.
@@ -112,7 +109,7 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="TVSRide"
+        android:label="${appLabel}"
         android:supportsRtl="true"
         android:theme="@style/Theme.TVSRide">
 
@@ -157,7 +154,7 @@
              read-only and only for that share. Not exported. -->
         <provider
             android:name="androidx.core.content.FileProvider"
-            android:authorities="dev.tvsopen.export"
+            android:authorities="${applicationId}.export"
             android:exported="false"
             android:grantUriPermissions="true">
             <meta-data

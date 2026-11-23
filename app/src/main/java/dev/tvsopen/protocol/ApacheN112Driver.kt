@@ -412,14 +412,27 @@ class ApacheN112Driver(
         }
 
         /**
-         * Official `BluetoothUtil.getSignalType`: Android network type to the
-         * cluster's 0..3 class. 5G (NR, 20) is not in the official table and
-         * maps to 0 there too.
+         * Android network type to the cluster's signal-type class (0..3).
+         *
+         * The N112 cluster shows four tiers: none (0), 2G (1), 3G (2), and a top
+         * tier (3) it renders as "4G" — there is no 5G glyph. This follows the
+         * official app's newer `getMobileSignalType` buckets (which, unlike the
+         * older getSignalType, cover LTE-CA, Wi-Fi calling and 5G) collapsed onto
+         * that 0..3 scale:
+         *   - 2G                                        -> 1
+         *   - 3G                                        -> 2
+         *   - 4G/5G: LTE, IWLAN (Wi-Fi calling), LTE-CA, NR -> 3
+         *
+         * IWLAN (18) and NR (20) reach 3 rather than 0, so a phone on Wi-Fi
+         * calling or 5G shows a full "4G" tower instead of an empty one. Both
+         * were confirmed from a device log: the original empty tower was NR (20),
+         * and a SIM re-enable left the phone on IWLAN (18), each previously
+         * dropping to 0.
          */
         fun networkClass(networkType: Int): Int = when (networkType) {
-            1, 2, 4, 7, 11 -> 1 // GPRS, EDGE, CDMA, 1xRTT, iDEN
-            3, 5, 6, 8, 9, 10, 12, 14, 15 -> 2 // UMTS, EVDO, HSPA family, eHRPD, HSPA+
-            13 -> 3 // LTE
+            1, 2, 4, 7, 11, 16 -> 1 // 2G: GPRS, EDGE, CDMA, 1xRTT, iDEN, GSM
+            3, 5, 6, 8, 9, 10, 12, 14, 15, 17 -> 2 // 3G: UMTS, EVDO, HSPA*, eHRPD, TD-SCDMA
+            13, 18, 19, 20 -> 3 // 4G/5G: LTE, IWLAN, LTE-CA, NR -> cluster's top "4G" tier
             else -> 0
         }
 

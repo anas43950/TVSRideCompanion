@@ -4,6 +4,7 @@ build/
 *.apk
 local.properties
 .idea/
+app/release
 
 # Signing material. The keystore lives outside the repo entirely, in
 # ~/tvs-signing/, and reaches CI only as a base64 secret. These two entries are

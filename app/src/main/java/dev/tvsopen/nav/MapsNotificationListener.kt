@@ -143,13 +143,17 @@ class MapsNotificationListener : NotificationListenerService() {
         val hasMessageStyle = style != null
         val isMessage = hasMessageStyle || category == Notification.CATEGORY_MESSAGE
         trackSms(n, isMessage, style?.messages?.size)
-        if (isMessage && prefs.mirrorMessages) {
-            // Only mirror messaging apps; a random app using MessagingStyle for
-            // progress would be noise. Known packages plus any app whose
-            // category is explicitly MESSAGE.
-            if (pkg in MESSAGE_PACKAGES || category == Notification.CATEGORY_MESSAGE || hasMessageStyle) {
-                postMessage(n.key, pkg, extras, title)
-            }
+        // Alert only for a real SMS, using the exact gate the unread counter
+        // uses (SmsUnread.isSmsMessage), so the alert and the count always
+        // agree. A message from WhatsApp or any other non-SMS app lights no
+        // SMS-slot alert, just as it already does not bump the marker.
+        // Mirroring every messaging app here was leftover from an earlier
+        // design; the counter was narrowed to SMS and this had not been.
+        val defaultSms = runCatching {
+            android.provider.Telephony.Sms.getDefaultSmsPackage(this)
+        }.getOrNull()
+        if (prefs.mirrorMessages && SmsUnread.isSmsMessage(pkg, defaultSms, ongoing, isMessage)) {
+            postMessage(n.key, pkg, extras, title)
         }
     }
 
@@ -183,9 +187,6 @@ class MapsNotificationListener : NotificationListenerService() {
         _instruction.value = step
         _navigating.value = true
     }
-
-    private fun isMessagingCall(pkg: String): Boolean =
-        pkg in APP_CALL_PACKAGES
 
     private fun postCall(key: String, pkg: String, extras: Bundle, title: String, text: String) {
         val number = extras.getString("android.telecom.extra.INCOMING_CALL_ADDRESS")
@@ -319,28 +320,6 @@ class MapsNotificationListener : NotificationListenerService() {
 
     companion object {
         private const val TAG = "MapsNavListener"
-
-        /** Apps commonly posting messages/calls that riders expect to see. */
-        private val APP_CALL_PACKAGES = setOf(
-            "com.whatsapp",
-            "org.telegram.messenger",
-            "org.telegram.messenger.web",
-            "com.facebook.orca",
-            "com.google.android.apps.tachyon", // Duo/Meet legacy
-            "com.instagram.android",
-        )
-
-        private val MESSAGE_PACKAGES = setOf(
-            "com.whatsapp",
-            "org.telegram.messenger",
-            "org.telegram.messenger.web",
-            "com.facebook.orca",
-            "com.instagram.android",
-            "com.google.android.apps.messaging",
-            "com.samsung.android.messaging",
-            "com.android.mms",
-            "org.thoughtcrime.securesms", // Signal
-        )
 
         private const val EXTRA_MESSAGING_STYLE_KEY = "android.messagingStyle"
 

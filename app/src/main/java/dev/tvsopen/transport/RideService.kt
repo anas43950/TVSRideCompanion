@@ -581,24 +581,89 @@ class RideService : android.app.Service() {
     }
 
     /**
+     * Mobile signal as a 0..4 level, matching the phone's own status bar more
+     * closely than the aggregate getSignalStrength().level (which can read a bar
+     * low). On API 29+ it takes the best of the per-cell levels from
+     * getCellSignalStrengths() — no location permission needed, unlike
+     * getAllCellInfo() — and falls back to the aggregate level, then 0. Callers
+     * gate this on service state; here it only reads what the radio reports.
+     */
+    @Suppress("DEPRECATION")
+    private fun cellSignalLevel(tm: android.telephony.TelephonyManager?): Int {
+        if (tm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return 0
+        val ss = runCatching { tm.signalStrength }.getOrNull() ?: return 0
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val best = runCatching { ss.cellSignalStrengths }.getOrNull()
+                ?.maxOfOrNull { cellLevel(it) }
+            if (best != null) return best
+        }
+        return runCatching { ss.level }.getOrNull() ?: 0
+    }
+
+    /**
+     * One cell's 0..4 level. For everything except 5G this is the radio's own
+     * getLevel(), which matches the status bar (LTE -107 dBm → 3 on both).
+     *
+     * 5G NR is the exception: the public CellSignalStrengthNr.getLevel() uses
+     * conservative AOSP thresholds — a strong -92 dBm read as 1 while the phone
+     * showed 4 — so NR is mapped from ssRsrp (dBm) with the more generous cutoffs
+     * operators actually use. Reading the exact per-carrier thresholds would need
+     * CarrierConfig; these fixed cutoffs get within a bar without it. Unknown
+     * ssRsrp (Int.MAX_VALUE) falls back to getLevel().
+     */
+    @Suppress("DEPRECATION")
+    private fun cellLevel(css: android.telephony.CellSignalStrength): Int {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            css is android.telephony.CellSignalStrengthNr
+        ) {
+            val rsrp = css.ssRsrp
+            if (rsrp != Int.MAX_VALUE && rsrp in -140..-30) {
+                return when {
+                    rsrp >= -95 -> 4
+                    rsrp >= -105 -> 3
+                    rsrp >= -112 -> 2
+                    rsrp >= -120 -> 1
+                    else -> 0
+                }
+            }
+        }
+        return runCatching { css.level }.getOrNull() ?: 0
+    }
+
+    /**
      * Real phone values for the cluster's status icons, in the official scales.
      *
      * Each source degrades to 0 on its own rather than failing the frame:
      * network type needs READ_PHONE_STATE and missed calls READ_CALL_LOG (both
      * optional caller-ID permissions). Unread messages are always 0 — reading
      * them needs SMS access, which this app does not request.
+     *
+     * Signal and network are polled fresh each cycle and both gated by
+     * getServiceState(): out of service reads 0 bars and an empty tower, rather
+     * than the framework's last pushed getSignalStrength()/getNetworkType()
+     * value, which lingers (stale-high) when the phone drops service. The
+     * service state does update on a poll, so with no state of our own a SIM
+     * toggled off and back on recovers on the next cycle. Only READ_PHONE_STATE
+     * is needed (no location).
+     *
+     * The bars use the best per-cell level ([cellSignalLevel]) rather than the
+     * aggregate getSignalStrength().level, which reads a bar low next to the
+     * phone's own status bar. Network type uses getNetworkType() (the registered
+     * network, unlike getDataNetworkType() which reads UNKNOWN when cellular data
+     * is idle); 5G and Wi-Fi calling are folded into the "4G" tier in
+     * [ApacheN112Driver.networkClass].
      */
+    @Suppress("DEPRECATION")
     private fun phoneStatus(): PhoneStatus {
         val percent = getSystemService(android.os.BatteryManager::class.java)
             ?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
         val tm = getSystemService(android.telephony.TelephonyManager::class.java)
-        val signal = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching { tm?.signalStrength?.level }.getOrNull() ?: 0
-        } else {
-            0
-        }
-        val networkType = if (granted(Manifest.permission.READ_PHONE_STATE)) {
-            runCatching { tm?.dataNetworkType }.getOrNull() ?: 0
+        val inService = runCatching {
+            tm?.serviceState?.state == android.telephony.ServiceState.STATE_IN_SERVICE
+        }.getOrNull() ?: true
+        val signal = if (inService) cellSignalLevel(tm) else 0
+        val networkType = if (inService && granted(Manifest.permission.READ_PHONE_STATE)) {
+            runCatching { tm?.networkType }.getOrNull() ?: 0
         } else {
             0
         }

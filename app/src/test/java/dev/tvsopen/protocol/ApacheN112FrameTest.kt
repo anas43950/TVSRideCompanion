@@ -81,13 +81,21 @@ class ApacheN112FrameTest {
     }
 
     @Test
-    fun `network type maps to the official classes`() {
+    fun `network type maps to the cluster's signal classes`() {
         assertEquals(1, ApacheN112Driver.networkClass(2)) // EDGE
+        assertEquals(1, ApacheN112Driver.networkClass(16)) // GSM
         assertEquals(2, ApacheN112Driver.networkClass(3)) // UMTS
         assertEquals(2, ApacheN112Driver.networkClass(15)) // HSPA+
+        assertEquals(2, ApacheN112Driver.networkClass(17)) // TD-SCDMA
         assertEquals(3, ApacheN112Driver.networkClass(13)) // LTE
-        assertEquals(0, ApacheN112Driver.networkClass(20)) // NR: not in the official table
-        assertEquals(0, ApacheN112Driver.networkClass(0)) // unknown
+        // The whole 4G/5G bucket is the cluster's top "4G" tier rather than 0,
+        // so Wi-Fi calling and 5G show a full tower instead of an empty one.
+        // Both were confirmed empty-tower cases on a device: NR after connect,
+        // IWLAN after a SIM re-enable.
+        assertEquals(3, ApacheN112Driver.networkClass(18)) // IWLAN (Wi-Fi calling)
+        assertEquals(3, ApacheN112Driver.networkClass(19)) // LTE-CA
+        assertEquals(3, ApacheN112Driver.networkClass(20)) // NR (5G)
+        assertEquals(0, ApacheN112Driver.networkClass(0)) // unknown / no service
     }
 
     // ---- names ----

@@ -39,6 +39,16 @@ class SmsUnreadTest {
     }
 
     @Test
+    fun `non-SMS messaging apps neither count nor alert`() {
+        // This gate drives both the unread-SMS marker and the cluster SMS
+        // alert, so a WhatsApp or Telegram message (a real message, not
+        // ongoing) is false on both: no SMS-slot alert, no bump to the count.
+        assertFalse(SmsUnread.isSmsMessage("com.whatsapp", samsung, ongoing = false, isMessage = true))
+        assertFalse(SmsUnread.isSmsMessage("org.telegram.messenger", "org.example.sms", ongoing = false, isMessage = true))
+        assertFalse(SmsUnread.isSmsMessage("org.thoughtcrime.securesms", null, ongoing = false, isMessage = true))
+    }
+
+    @Test
     fun `a conversation counts its messages and a group summary counts none`() {
         assertEquals(3, SmsUnread.messagesIn(isGroupSummary = false, styleMessages = 3))
         assertEquals(1, SmsUnread.messagesIn(isGroupSummary = false, styleMessages = null))
