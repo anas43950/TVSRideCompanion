@@ -50,10 +50,11 @@ import dev.tvsopen.ui.theme.NumberStyle
  * Overview: the app's main screen.
  *
  * Built for the Apache RTR 160 4V, the vehicle this branch targets: only what
- * its cluster actually sends is shown. Live speed and gear, top speed and
- * engine RPM, the 8-bar fuel gauge, and distance. The Ntorq-only tiles
- * (battery voltage, coolant, fuel economy, firmware, best 0–60, service,
- * check engine, range) never arrive from this bike and were removed.
+ * its cluster actually sends is shown. Live speed, gear, this-connection
+ * distance and engine RPM; the 8-bar fuel gauge; and the persisted records,
+ * total distance and top speed. The Ntorq-only tiles (battery voltage, coolant,
+ * fuel economy, firmware, best 0–60, service, check engine, range) never arrive
+ * from this bike and were removed.
  *
  * Connection state and the Connect button sit at the top, because with no Home
  * tab this is the first thing the app shows.
@@ -74,9 +75,9 @@ fun OverviewScreen(
     modifier: Modifier = Modifier,
 ) {
     val connected = connection.state == ConnectionState.CONNECTED
-    // Disconnected, the moment-to-moment tiles (speed, gear, top speed, RPM,
-    // this-connection distance) blank to "—" instead of lingering on the last
-    // values Session still holds. Fuel and total distance are the exception:
+    // Disconnected, the moment-to-moment tiles (speed, gear, RPM, this-
+    // connection distance) blank to "—" instead of lingering on the last values
+    // Session still holds. Fuel, total distance and top speed are the exception:
     // they are the persisted last-known readings (LastReadings), kept visible
     // with the bike off on purpose, so shownTelemetry carries them through.
     val shown = shownTelemetry(telemetry, connected)
@@ -127,10 +128,11 @@ fun OverviewScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             BigStat(
                 Modifier.weight(1f),
-                Icons.Filled.Speed,
-                shown.topSpeedKmh?.toString() ?: "—",
-                "km/h",
-                "Top Speed",
+                Icons.Filled.Route,
+                // Live: distance since this link came up; blanks with the bike off.
+                shown.connectedDistanceKm()?.let { String.format("%.1f", it) } ?: "—",
+                "km",
+                "This connection",
                 LocalTilePalette.current.neutral,
             )
             BigStat(
@@ -149,7 +151,7 @@ fun OverviewScreen(
         FuelGauge(shown.fuelBars, shown.lowFuel == true)
 
         Spacer(Modifier.height(20.dp))
-        SectionLabel("Distance Travelled")
+        SectionLabel("Records")
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             DistanceStat(
@@ -160,10 +162,11 @@ fun OverviewScreen(
             )
             DistanceStat(
                 Modifier.weight(1f),
-                Icons.Filled.Route,
-                shown.connectedDistanceKm()
-                    ?.let { String.format("%.1f", it) } ?: "—",
-                "This connection (km)",
+                Icons.Filled.Speed,
+                // Persisted like the odometer: the bike updates it only on a
+                // new high, so it stays visible with the bike off.
+                shown.topSpeedKmh?.toString() ?: "—",
+                "Top speed (km/h)",
             )
         }
 
@@ -173,16 +176,16 @@ fun OverviewScreen(
 
 /**
  * What the tiles should read from. Moment-to-moment live data belongs to a live
- * link, so once the bike is not connected this blanks it — speed, gear, top
- * speed, RPM and the this-connection distance all go null and read as `—`,
- * instead of lingering on the last values Session still holds after a drop.
+ * link, so once the bike is not connected this blanks it — speed, gear, RPM and
+ * the this-connection distance all go null and read as `—`, instead of
+ * lingering on the last values Session still holds after a drop.
  *
- * Fuel and total distance (odometer) are kept: they are the persisted
- * last-known readings [LastReadings] stores precisely so they stay visible with
- * the bike off, and blanking them would undo that. This carries exactly those
- * three fields through — the same ones LastReadings persists — and drops the
- * rest. (odometerAtConnectKm is among the dropped, so "This connection" reads
- * `—` while disconnected.)
+ * Fuel, total distance (odometer) and top speed are kept: they are the
+ * persisted last-known readings [LastReadings] stores precisely so they stay
+ * visible with the bike off, and blanking them would undo that. This carries
+ * exactly those fields through — the same ones LastReadings persists — and
+ * drops the rest. (odometerAtConnectKm is among the dropped, so "This
+ * connection" reads `—` while disconnected.)
  */
 internal fun shownTelemetry(telemetry: Telemetry, connected: Boolean): Telemetry =
     if (connected) {
@@ -192,6 +195,7 @@ internal fun shownTelemetry(telemetry: Telemetry, connected: Boolean): Telemetry
             fuelBars = telemetry.fuelBars,
             lowFuel = telemetry.lowFuel,
             odometerKm = telemetry.odometerKm,
+            topSpeedKmh = telemetry.topSpeedKmh,
         )
     }
 

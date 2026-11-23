@@ -16,7 +16,7 @@ class LabelsTest {
     }
 
     @Test
-    fun `disconnected keeps saved fuel and distance, blanks live data`() {
+    fun `disconnected keeps saved fuel, distance and top speed, blanks live data`() {
         val live = Telemetry(
             speedKmh = 42,
             gear = 3,
@@ -29,11 +29,11 @@ class LabelsTest {
         )
         // Connected: the real snapshot flows through untouched.
         assertEquals(live, shownTelemetry(live, connected = true))
-        // Disconnected: only the persisted last-known readings remain — fuel
-        // and total distance stay visible, live tiles fall back to "—", and
-        // "This connection" is gone with odometerAtConnectKm dropped.
+        // Disconnected: only the persisted last-known readings remain — fuel,
+        // total distance and top speed stay visible, live tiles fall back to
+        // "—", and "This connection" is gone with odometerAtConnectKm dropped.
         assertEquals(
-            Telemetry(fuelBars = 6, lowFuel = false, odometerKm = 1234.5),
+            Telemetry(fuelBars = 6, lowFuel = false, odometerKm = 1234.5, topSpeedKmh = 88),
             shownTelemetry(live, connected = false),
         )
     }

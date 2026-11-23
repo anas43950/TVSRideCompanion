@@ -1,9 +1,11 @@
-// The last fuel level and odometer the bike sent, kept across app restarts.
+// The last fuel level, odometer and top speed the bike sent, kept across app
+// restarts.
 //
 // Everything else on Overview is live data that only matters while riding,
-// and it is held in memory only. These two are worth seeing with the bike off:
-// the bike sends them once on connect and then only when they change, so
-// without this a restarted app shows "—" until the next connection.
+// and it is held in memory only. These are worth seeing with the bike off:
+// the bike sends them once on connect and then only when they change (top
+// speed only on a new high), so without this a restarted app shows "—" until
+// the next connection.
 
 package dev.tvsopen.session
 
@@ -16,6 +18,7 @@ class LastReadings(context: Context) {
         val fuelBars: Int? = null,
         val lowFuel: Boolean? = null,
         val odometerKm: Double? = null,
+        val topSpeedKmh: Int? = null,
     )
 
     private val sp = context.applicationContext
@@ -25,6 +28,7 @@ class LastReadings(context: Context) {
         fuelBars = if (sp.contains(KEY_FUEL)) sp.getInt(KEY_FUEL, 0) else null,
         lowFuel = if (sp.contains(KEY_LOW)) sp.getBoolean(KEY_LOW, false) else null,
         odometerKm = sp.getString(KEY_ODO, null)?.toDoubleOrNull(),
+        topSpeedKmh = if (sp.contains(KEY_TOP)) sp.getInt(KEY_TOP, 0) else null,
     )
 
     fun save(v: Values) {
@@ -32,6 +36,7 @@ class LastReadings(context: Context) {
         v.fuelBars?.let { e.putInt(KEY_FUEL, it) }
         v.lowFuel?.let { e.putBoolean(KEY_LOW, it) }
         v.odometerKm?.let { e.putString(KEY_ODO, it.toString()) }
+        v.topSpeedKmh?.let { e.putInt(KEY_TOP, it) }
         e.apply()
     }
 
@@ -39,6 +44,7 @@ class LastReadings(context: Context) {
         private const val KEY_FUEL = "fuel_bars"
         private const val KEY_LOW = "low_fuel"
         private const val KEY_ODO = "odometer_km"
+        private const val KEY_TOP = "top_speed_kmh"
 
         /**
          * The values to store after a frame, or null when nothing changed.
@@ -49,6 +55,7 @@ class LastReadings(context: Context) {
                 fuelBars = t.fuelBars ?: saved.fuelBars,
                 lowFuel = t.lowFuel ?: saved.lowFuel,
                 odometerKm = t.odometerKm ?: saved.odometerKm,
+                topSpeedKmh = t.topSpeedKmh ?: saved.topSpeedKmh,
             )
             return next.takeIf { it != saved }
         }
@@ -62,6 +69,7 @@ class LastReadings(context: Context) {
             fuelBars = cur.fuelBars ?: saved.fuelBars,
             lowFuel = cur.lowFuel ?: saved.lowFuel,
             odometerKm = cur.odometerKm ?: saved.odometerKm,
+            topSpeedKmh = cur.topSpeedKmh ?: saved.topSpeedKmh,
         )
     }
 }

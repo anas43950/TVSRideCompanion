@@ -1,4 +1,5 @@
-// Last fuel level and odometer, kept across app restarts. Invented values.
+// Last fuel level, odometer and top speed, kept across app restarts. Invented
+// values.
 
 package dev.tvsopen.session
 
@@ -28,6 +29,19 @@ class LastReadingsTest {
         // Odometer moved, fuel not received yet in this process.
         val t = Telemetry(odometerKm = 6789.5)
         assertEquals(LastReadings.Values(7, false, 6789.5), LastReadings.update(saved, t))
+    }
+
+    @Test
+    fun `top speed is stored and a new high replaces it`() {
+        val first = LastReadings.update(LastReadings.Values(), Telemetry(topSpeedKmh = 88))
+        assertEquals(88, first?.topSpeedKmh)
+        // A new high the bike reports replaces the stored one.
+        val higher = LastReadings.update(LastReadings.Values(topSpeedKmh = 88), Telemetry(topSpeedKmh = 102))
+        assertEquals(102, higher?.topSpeedKmh)
+        // No top speed this frame keeps the stored one and writes nothing.
+        assertNull(LastReadings.update(LastReadings.Values(topSpeedKmh = 102), Telemetry(speedKmh = 40)))
+        // Restore fills it in when the process has not received one yet.
+        assertEquals(102, LastReadings.restore(Telemetry(), LastReadings.Values(topSpeedKmh = 102)).topSpeedKmh)
     }
 
     @Test
