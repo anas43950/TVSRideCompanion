@@ -1,12 +1,13 @@
 // What the app does before the rider has touched anything.
 //
-// Three defaults, all of which were wrong in ways that looked fine:
+// Defaults that each fixed a bug that looked fine:
 //
-// - The scan filtered on the service UUID, and this cluster advertises no UUID,
-//   so the scan screen found nothing on the one vehicle known to work.
-// - The scan screen preselected the model decoded from the BLE name, which for
-//   `TVSBT…` is UNKNOWN — and connecting with UNKNOWN selects a driver with no
-//   frame table, no nav and no caller ID.
+// - The "Only TVS" filter is name-based and applied in software, so it defaults
+//   on and still surfaces the UUID-less Apache. The earlier UUID ScanFilter had
+//   to default off, because it found nothing on the one vehicle known to work.
+// - The scan screen no longer asks for a model: this build connects as
+//   APACHE_160 and RideService resolves the driver from the offered service.
+//   UNKNOWN would have selected a driver with no frame table, nav or caller ID.
 // - First launch asked for nothing, so a rider could install, connect
 //   successfully, start a route and see nothing on the cluster, with no
 //   indication a permission was missing.
@@ -31,37 +32,35 @@ import org.junit.Test
 class FirstLaunchDefaultsTest {
 
     @Test
-    fun `the scan filter defaults off because this cluster advertises no UUID`() {
-        // A ScanFilter.setServiceUuid is applied to the advertisement, and this
-        // cluster advertises none. Filtering by default made the scan screen find
-        // no clusters at all on the rider's own Ntorq.
-        assertFalse(
-            "UUID-filtered scan finds nothing on this cluster",
+    fun `the scan filter defaults on and is name-based, not a UUID ScanFilter`() {
+        // The "Only TVS" filter is now applied in ScooterScanner.publish(), not
+        // as a platform ScanFilter.setServiceUuid(...). That is what makes
+        // defaulting it on safe: the UUID-less Apache (advertising "TVS2509…")
+        // is matched by name and still appears. The old UUID filter had to
+        // default off because it hid the rider's own cluster at the OS level.
+        assertTrue(
+            "name-based filter still surfaces the UUID-less Apache",
             ScanState().onlySmartXonnect,
         )
     }
 
     @Test
-    fun `the default Ntorq model is the model a fresh scan preselects`() {
-        // ScanScreen uses the remembered last model if present, else NTORQ.
-        // For a fresh install there is no remembered value, so this must remain
-        // the exact default rather than UNKNOWN from the advertised TVSBT name.
-        assertEquals(VehicleModel.NTORQ, VehicleModel.NTORQ)
-        assertNotEquals(VehicleModel.UNKNOWN, VehicleModel.NTORQ)
-    }
-
-    @Test
-    fun `a fresh scan starts empty and unfiltered`() {
+    fun `a fresh scan starts empty with the filter on`() {
         val s = ScanState()
-        assertFalse(s.onlySmartXonnect)
+        assertTrue(s.onlySmartXonnect)
         assertEquals(emptyList<Discovered>(), s.devices)
         assertFalse(s.scanning)
     }
 
     @Test
-    fun `the default model is an Ntorq, not UNKNOWN`() {
-        assertNotEquals(VehicleModel.UNKNOWN, VehicleModel.NTORQ)
-        assertEquals("NTORQ", VehicleModel.NTORQ.name)
+    fun `the fixed connect model is an Apache, not UNKNOWN`() {
+        // The scan screen no longer asks for a model: this build connects as
+        // APACHE_160, and RideService resolves the real driver from the offered
+        // service anyway. UNKNOWN would have selected a driver with no frame
+        // table, so pinning the fixed value guards against that regressing.
+        assertNotEquals(VehicleModel.UNKNOWN, VehicleModel.APACHE_160)
+        assertEquals("APACHE_160", VehicleModel.APACHE_160.name)
+        assertTrue(VehicleModel.APACHE_160.isApache())
     }
 
     @Test

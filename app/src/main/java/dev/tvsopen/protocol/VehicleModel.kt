@@ -35,7 +35,7 @@ enum class VehicleModel(
     NTORQ("ntorq", "Ntorq 150 (SX)", Display.LARGE_TFT),
     JUPITER_110("jupiter110", "Jupiter 110"),
     JUPITER_125("jupiter125", "Jupiter 125"),
-    APACHE_160("apache160", "Apache RTR 160"),
+    APACHE_160("apache160", "Apache RTR 160 4V"),
     APACHE_180("apache180", "Apache RTR 180"),
 
     /**

@@ -124,9 +124,13 @@ class RidePrefs private constructor(private val ctx: Context) {
             }.apply()
         }
 
-    /** Scan preference; default is unfiltered because the Ntorq advertises no UUID. */
+    /**
+     * Scan preference: show only TVS-looking clusters. Default on. Safe to
+     * default on now that the filter matches by name in software and no longer
+     * applies a hardware service-UUID filter that hid the UUID-less Apache.
+     */
     var onlySmartXonnect: Boolean
-        get() = sp.getBoolean(KEY_ONLY_SMART_XONNECT, false)
+        get() = sp.getBoolean(KEY_ONLY_SMART_XONNECT, true)
         set(value) { sp.edit().putBoolean(KEY_ONLY_SMART_XONNECT, value).apply() }
 
     /** Navigation mirroring is the product default; preserve an explicit opt-out. */

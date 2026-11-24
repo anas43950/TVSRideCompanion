@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -49,7 +50,6 @@ import dev.tvsopen.protocol.VehicleModel
 import dev.tvsopen.session.Session
 import dev.tvsopen.transport.ConnectionState
 import dev.tvsopen.transport.RideService
-import dev.tvsopen.transport.ScooterPairing
 import dev.tvsopen.transport.ScooterScanner
 import dev.tvsopen.transport.label
 import dev.tvsopen.ui.theme.ThemePrefs
@@ -465,6 +465,11 @@ class MainActivity : AppCompatActivity() {
             mutableStateOf(RidePrefs.load(this@MainActivity).navigationMirroring)
         }
 
+        // System back on the scan takeover closes it rather than finishing the
+        // activity — the scanner is the launch screen when no vehicle is saved,
+        // and exiting the whole app from it reads as a crash.
+        BackHandler(enabled = scanning.value) { scanning.value = false }
+
         val telemetry by Session.telemetry.collectAsStateWithLifecycle()
         val hud by Session.hud.collectAsStateWithLifecycle()
         val connection by Session.connection.collectAsStateWithLifecycle()
@@ -531,10 +536,12 @@ class MainActivity : AppCompatActivity() {
                         // dialog would either clip or cover the nav bar.
                         ScanScreen(
                             scanner = scanner,
-                            pairing = pairing,
-                            lastModelId = RidePrefs.load(this@MainActivity).lastModelId,
-                            onPick = { address, model ->
+                            onPick = { address ->
                                 scanning.value = false
+                                // Fixed model: this build targets the Apache RTR
+                                // 160 4V, and the driver is resolved from the
+                                // offered service anyway (see RideService).
+                                val model = VehicleModel.APACHE_160
                                 RidePrefs.load(this@MainActivity)
                                     .updateSelectedModel(address, model.name)
                                 RidePrefs.load(this@MainActivity)
@@ -545,7 +552,9 @@ class MainActivity : AppCompatActivity() {
                             },
                             onBack = { scanning.value = false },
                             onRequestBluetooth = {
-                                ensureBluetoothOn { scanner.start() }
+                                ensureBluetoothOn {
+                                    scanner.start(RidePrefs.load(this@MainActivity).onlySmartXonnect)
+                                }
                             },
                         )
                     } else when (tab) {
@@ -758,7 +767,6 @@ class MainActivity : AppCompatActivity() {
      */
     private val scanning = mutableStateOf(false)
     private val scanner: ScooterScanner by lazy { ScooterScanner(this) }
-    private val pairing: ScooterPairing by lazy { ScooterPairing(this) }
 
     private fun openScanner() {
         if (!hasBlePermission()) {
@@ -766,11 +774,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
         scanning.value = true
+        // Honour the persisted "Only TVS" preference on the first scan, so it
+        // survives a process restart rather than resetting to the scanner's
+        // in-memory default.
+        val onlyTvs = RidePrefs.load(this).onlySmartXonnect
         // Starting with the radio off is deliberate: the scanner then records
         // `bluetoothOff`, so if the user declines the prompt the scan screen
         // explains why it is empty and offers the button again.
-        scanner.start()
-        if (!isBluetoothOn()) ensureBluetoothOn { scanner.start() }
+        scanner.start(onlyTvs)
+        if (!isBluetoothOn()) ensureBluetoothOn { scanner.start(onlyTvs) }
     }
 
     /**

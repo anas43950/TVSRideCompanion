@@ -6,11 +6,13 @@
 //
 // Two design choices worth stating, because both are judgement calls:
 //
-//   - **Filtered by default.** The SmartXonnect service UUID narrows this from
-//     "every wearable in the room" to "things that might be a cluster". The
-//     escape hatch to an unfiltered scan exists because a cluster that is
-//     already paired and asleep may advertise nothing at all, and a filter
-//     that can never fail open would hide exactly the device you want.
+//   - **Filtered by default, in software.** The "Only TVS" filter narrows this
+//     from "every wearable in the room" to "things that look like a TVS
+//     cluster", by UUID or by name. It is applied in `publish()`, not as a
+//     platform `ScanFilter`: the Apache advertises service `5500` (or no UUID
+//     at all), so a hardware UUID filter would hide the one device we want. The
+//     escape hatch to an unfiltered list stays for anything that advertises
+//     neither the UUID nor a `TVS…` name.
 //   - **Time-boxed.** Scanning is the single most expensive thing this app can
 //     do to the battery, and it has no reason to keep running once the scooter
 //     is found. The scan stops itself rather than relying on the UI to
@@ -56,21 +58,18 @@ data class ScanState(
     val scanning: Boolean = false,
 
     /**
-     * Whether to restrict the scan to clusters advertising the service UUID.
+     * Whether to restrict the list to things that look like a TVS cluster —
+     * matched by service UUID *or* by a `TVS…` name (see [Discovered.isSmartXonnect]).
      *
-     * **Default off**, and this is a measured finding rather than a preference.
-     * The filter maps to a `ScanFilter.setServiceUuid(...)`, which the platform
-     * applies to the *advertisement packet*. This cluster advertises **no
-     * service UUID at all** — that is why a UUID-filtered scan of the rider's
-     * own Ntorq finds nothing at all, and why the app has to find it by name
-     * (`TVSBT…`).
-     *
-     * Defaulting this on therefore made the scan screen find no clusters, on the
-     * one vehicle that is known to work. The cost of off is a longer result list
-     * containing non-clusters, which `publish()` sorts past by putting
-     * SmartXonnect devices first.
+     * **Default on.** This is now a *software* filter in `publish()`, not a
+     * platform `ScanFilter`, so it no longer hides the UUID-less Apache: the
+     * scan still sees every advertisement and keeps only the cluster-looking
+     * ones. An earlier version mapped this to `ScanFilter.setServiceUuid(...)`
+     * and had to default off, because that filtered the rider's own cluster out
+     * at the OS level. Turning it off here just widens the list to every BLE
+     * device for the rare case that advertises neither signal.
      */
-    val onlySmartXonnect: Boolean = false,
+    val onlySmartXonnect: Boolean = true,
     val devices: List<Discovered> = emptyList(),
     /** Set when the scan could not start at all — usually a missing permission. */
     val error: String? = null,
@@ -205,17 +204,11 @@ class ScooterScanner(private val context: Context) {
             bluetoothOff = false,
         )
 
-        val filters = if (onlySmartXonnect) {
-            // ParcelUuid wraps a UUID, not a string; Gatt.SERVICE is the string
-            // form, so parse it rather than passing it straight through.
-            listOf(
-                ScanFilter.Builder()
-                    .setServiceUuid(ParcelUuid(java.util.UUID.fromString(Gatt.SERVICE)))
-                    .build(),
-            )
-        } else {
-            emptyList()
-        }
+        // No platform ScanFilter, ever: the Apache advertises service `5500` or
+        // no UUID at all, so a hardware UUID filter would drop it before
+        // `record()` runs. The "Only TVS" narrowing is done in `publish()`
+        // instead, which can match on the advertised name as well.
+        val filters = emptyList<ScanFilter>()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
